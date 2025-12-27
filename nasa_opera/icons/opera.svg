@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="earthGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1565C0"/>
+      <stop offset="50%" style="stop-color:#42A5F5"/>
+      <stop offset="100%" style="stop-color:#1976D2"/>
+    </linearGradient>
+    <linearGradient id="satelliteGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFA726"/>
+      <stop offset="100%" style="stop-color:#FF7043"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle (Earth) -->
+  <circle cx="32" cy="32" r="28" fill="url(#earthGradient)" stroke="#0D47A1" stroke-width="2"/>
+
+  <!-- Land masses stylized -->
+  <path d="M20 22 Q25 18 30 20 Q35 22 32 28 Q28 32 24 28 Q20 26 20 22" fill="#4CAF50" opacity="0.8"/>
+  <path d="M36 24 Q42 22 45 26 Q48 32 44 36 Q38 38 36 32 Q34 28 36 24" fill="#4CAF50" opacity="0.8"/>
+  <path d="M22 36 Q28 34 32 38 Q34 42 30 45 Q24 46 22 42 Q20 38 22 36" fill="#4CAF50" opacity="0.8"/>
+
+  <!-- Water highlight -->
+  <ellipse cx="42" cy="20" rx="6" ry="4" fill="white" opacity="0.2"/>
+
+  <!-- Satellite orbit ring -->
+  <ellipse cx="32" cy="32" rx="24" ry="8" fill="none" stroke="#FFA726" stroke-width="1.5" stroke-dasharray="4 2" transform="rotate(-30 32 32)"/>
+
+  <!-- Satellite -->
+  <g transform="translate(48, 18) rotate(45)">
+    <!-- Satellite body -->
+    <rect x="-4" y="-2" width="8" height="4" fill="url(#satelliteGradient)" rx="1"/>
+    <!-- Solar panels -->
+    <rect x="-12" y="-1" width="7" height="2" fill="#1565C0"/>
+    <rect x="5" y="-1" width="7" height="2" fill="#1565C0"/>
+    <!-- Antenna -->
+    <circle cx="0" cy="-4" r="1.5" fill="#FFA726"/>
+    <line x1="0" y1="-2" x2="0" y2="-3" stroke="#FFA726" stroke-width="0.5"/>
+  </g>
+
+  <!-- Data beams -->
+  <path d="M48 20 Q40 24 32 32" fill="none" stroke="#FFA726" stroke-width="1" stroke-dasharray="2 2" opacity="0.6"/>
+  <path d="M48 20 Q42 28 38 36" fill="none" stroke="#FFA726" stroke-width="1" stroke-dasharray="2 2" opacity="0.6"/>
+
+  <!-- NASA OPERA text arc (stylized) -->
+  <text x="32" y="58" font-family="Arial, sans-serif" font-size="6" font-weight="bold" fill="#0D47A1" text-anchor="middle">OPERA</text>
+</svg>

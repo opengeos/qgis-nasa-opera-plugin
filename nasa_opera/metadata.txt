@@ -1,0 +1,56 @@
+[general]
+name=NASA OPERA
+qgisMinimumVersion=3.28
+description=Search and visualize NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products.
+version=0.1.0
+author=Qiusheng Wu
+email=giswqs@gmail.com
+
+about=NASA OPERA Plugin for QGIS provides an intuitive interface for searching and visualizing
+    NASA OPERA data products directly in QGIS.
+
+    OPERA (Observational Products for End-Users from Remote Sensing Analysis) is a NASA project
+    that provides analysis-ready data products derived from satellite observations.
+
+    Available Datasets:
+    - DSWX-HLS: Dynamic Surface Water Extent from Harmonized Landsat Sentinel-2
+    - DSWX-S1: Dynamic Surface Water Extent from Sentinel-1
+    - DIST-ALERT-HLS: Land Surface Disturbance Alert from HLS
+    - DIST-ANN-HLS: Land Surface Disturbance Annual from HLS
+    - RTC-S1: Radiometric Terrain Corrected SAR Backscatter from Sentinel-1
+    - CSLC-S1: Coregistered Single-Look Complex from Sentinel-1
+
+    Features:
+    - Search OPERA products by location, date range, and dataset type
+    - Display search result footprints as vector layers
+    - Visualize OPERA raster data directly in QGIS
+    - Automatic authentication with NASA Earthdata
+    - Plugin update checker
+
+    Requirements:
+    - Python packages: earthaccess, geopandas, shapely, pandas
+    - NASA Earthdata account (free registration at https://urs.earthdata.nasa.gov)
+
+tracker=https://github.com/opengeos/qgis-nasa-opera-plugin/issues
+repository=https://github.com/opengeos/qgis-nasa-opera-plugin
+
+hasProcessingProvider=no
+
+tags=nasa, opera, satellite, remote sensing, water, surface water, dswx, disturbance, sar, sentinel, landsat, hls, earthdata
+
+homepage=https://github.com/opengeos/qgis-nasa-opera-plugin
+category=Raster
+icon=icons/opera.svg
+
+experimental=False
+deprecated=False
+
+changelog=
+    0.1.0 - Initial release
+        - NASA OPERA data search interface
+        - Support for all OPERA products (DSWX-HLS, DSWX-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1)
+        - Footprint visualization
+        - Raster layer display
+        - Settings panel with Earthdata credentials
+        - Update checker
+
