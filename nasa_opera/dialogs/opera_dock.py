@@ -37,6 +37,9 @@ from qgis.PyQt.QtWidgets import (
     QSplitter,
     QSizePolicy,
     QApplication,
+    QListWidget,
+    QListWidgetItem,
+    QAbstractItemView,
 )
 from qgis.PyQt.QtGui import QFont, QCursor
 from qgis.core import (
@@ -542,34 +545,66 @@ class OperaDockWidget(QDockWidget):
         results_layout = QVBoxLayout(results_group)
         results_layout.setSpacing(4)
 
-        # Granule selection
-        granule_layout = QFormLayout()
-        self.granule_combo = QComboBox()
-        self.granule_combo.setEnabled(False)
-        self.granule_combo.currentIndexChanged.connect(self._on_granule_changed)
-        granule_layout.addRow("Granule:", self.granule_combo)
+        # Granule list with multi-select
+        granule_label = QLabel("Granules (select one or more):")
+        results_layout.addWidget(granule_label)
+
+        self.granule_list = QListWidget()
+        self.granule_list.setEnabled(False)
+        self.granule_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.granule_list.setMaximumHeight(100)
+        self.granule_list.itemSelectionChanged.connect(
+            self._on_granule_selection_changed
+        )
+        results_layout.addWidget(self.granule_list)
+
+        # Select all / Deselect all buttons
+        select_btn_layout = QHBoxLayout()
+        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn.setEnabled(False)
+        self.select_all_btn.clicked.connect(self._select_all_granules)
+        select_btn_layout.addWidget(self.select_all_btn)
+
+        self.deselect_all_btn = QPushButton("Deselect All")
+        self.deselect_all_btn.setEnabled(False)
+        self.deselect_all_btn.clicked.connect(self._deselect_all_granules)
+        select_btn_layout.addWidget(self.deselect_all_btn)
+        results_layout.addLayout(select_btn_layout)
 
         # Layer selection
+        layer_layout = QFormLayout()
         self.layer_combo = QComboBox()
         self.layer_combo.setEnabled(False)
-        granule_layout.addRow("Layer:", self.layer_combo)
+        layer_layout.addRow("Layer:", self.layer_combo)
+        results_layout.addLayout(layer_layout)
 
-        results_layout.addLayout(granule_layout)
-
-        # Display buttons
-        display_btn_layout = QHBoxLayout()
+        # Display buttons - row 1
+        display_btn_layout1 = QHBoxLayout()
 
         self.display_single_btn = QPushButton("Display Single")
         self.display_single_btn.setEnabled(False)
         self.display_single_btn.clicked.connect(self._display_single)
-        display_btn_layout.addWidget(self.display_single_btn)
+        display_btn_layout1.addWidget(self.display_single_btn)
 
         self.display_footprints_btn = QPushButton("Show Footprints")
         self.display_footprints_btn.setEnabled(False)
         self.display_footprints_btn.clicked.connect(self._display_footprints)
-        display_btn_layout.addWidget(self.display_footprints_btn)
+        display_btn_layout1.addWidget(self.display_footprints_btn)
 
-        results_layout.addLayout(display_btn_layout)
+        results_layout.addLayout(display_btn_layout1)
+
+        # Display buttons - row 2 (Mosaic)
+        display_btn_layout2 = QHBoxLayout()
+
+        self.display_mosaic_btn = QPushButton("Display Mosaic")
+        self.display_mosaic_btn.setEnabled(False)
+        self.display_mosaic_btn.setToolTip(
+            "Create a virtual mosaic from selected granules"
+        )
+        self.display_mosaic_btn.clicked.connect(self._display_mosaic)
+        display_btn_layout2.addWidget(self.display_mosaic_btn)
+
+        results_layout.addLayout(display_btn_layout2)
 
         layout.addWidget(results_group)
 
@@ -694,18 +729,25 @@ class OperaDockWidget(QDockWidget):
         self.status_label.setText(f"Found {len(results)} granules")
         self.status_label.setStyleSheet("color: green; font-size: 10px;")
         self.output_text.append(f"\nFound {len(results)} granules.")
-        self.output_text.append("Select a granule from the dropdown to display.")
+        self.output_text.append("Select granule(s) from the list to display.")
 
-        # Populate granule dropdown
-        self.granule_combo.clear()
-        self.granule_combo.setEnabled(True)
+        # Populate granule list
+        self.granule_list.clear()
+        self.granule_list.setEnabled(True)
+        self.select_all_btn.setEnabled(True)
+        self.deselect_all_btn.setEnabled(True)
 
         for i, result in enumerate(results):
             native_id = result.get("meta", {}).get("native-id", f"Granule {i+1}")
-            self.granule_combo.addItem(native_id, i)
+            item = QListWidgetItem(native_id)
+            item.setData(Qt.UserRole, i)  # Store index
+            self.granule_list.addItem(item)
+
+        # Select first item by default
+        if self.granule_list.count() > 0:
+            self.granule_list.item(0).setSelected(True)
 
         # Enable buttons
-        self.display_single_btn.setEnabled(True)
         self.display_footprints_btn.setEnabled(gdf is not None)
 
     def _on_search_error(self, error_msg):
@@ -719,9 +761,25 @@ class OperaDockWidget(QDockWidget):
 
         QMessageBox.critical(self, "Search Error", f"Failed to search:\n{error_msg}")
 
-    def _on_granule_changed(self, index):
-        """Handle granule selection change."""
-        if index < 0 or index >= len(self._results):
+    def _on_granule_selection_changed(self):
+        """Handle granule selection change in the list widget."""
+        selected_items = self.granule_list.selectedItems()
+        num_selected = len(selected_items)
+
+        # Enable/disable buttons based on selection
+        self.display_single_btn.setEnabled(num_selected == 1)
+        self.display_mosaic_btn.setEnabled(num_selected >= 1)
+
+        if num_selected == 0:
+            self.layer_combo.clear()
+            self.layer_combo.setEnabled(False)
+            return
+
+        # Get the first selected granule to populate layer dropdown
+        first_item = selected_items[0]
+        index = first_item.data(Qt.UserRole)
+
+        if index is None or index >= len(self._results):
             return
 
         result = self._results[index]
@@ -737,11 +795,20 @@ class OperaDockWidget(QDockWidget):
             # Get filename from URL
             filename = link.split("/")[-1]
             if filename.endswith(".tif") or filename.endswith(".h5"):
+                # Store just the layer suffix (e.g., B01_WTR.tif)
                 self.layer_combo.addItem(filename, link)
 
         if self.layer_combo.count() == 0:
             self.layer_combo.addItem("No raster files available", None)
             self.layer_combo.setEnabled(False)
+
+    def _select_all_granules(self):
+        """Select all granules in the list."""
+        self.granule_list.selectAll()
+
+    def _deselect_all_granules(self):
+        """Deselect all granules in the list."""
+        self.granule_list.clearSelection()
 
     def _display_single(self):
         """Display selected granule layer."""
@@ -753,8 +820,13 @@ class OperaDockWidget(QDockWidget):
             QMessageBox.warning(self, "Error", "No valid layer selected")
             return
 
-        # Get the selected granule
-        granule_index = self.granule_combo.currentData()
+        # Get the selected granule from the list
+        selected_items = self.granule_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "Error", "No granule selected")
+            return
+
+        granule_index = selected_items[0].data(Qt.UserRole)
         if granule_index is None or granule_index >= len(self._results):
             QMessageBox.warning(self, "Error", "No valid granule selected")
             return
@@ -825,9 +897,13 @@ class OperaDockWidget(QDockWidget):
             QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
             self.display_single_btn.setEnabled(False)
             self.display_footprints_btn.setEnabled(False)
+            self.display_mosaic_btn.setEnabled(False)
         else:
             QApplication.restoreOverrideCursor()
-            self.display_single_btn.setEnabled(True)
+            # Re-enable buttons based on selection state
+            selected_items = self.granule_list.selectedItems()
+            self.display_single_btn.setEnabled(len(selected_items) == 1)
+            self.display_mosaic_btn.setEnabled(len(selected_items) >= 1)
             self.display_footprints_btn.setEnabled(self._gdf is not None)
 
     def _try_load_cog(self, url: str, layer_name: str) -> bool:
@@ -954,6 +1030,302 @@ class OperaDockWidget(QDockWidget):
             self, "Download Error", f"Failed to download:\n{error_msg}"
         )
 
+    def _display_mosaic(self):
+        """Display a virtual mosaic from selected granules.
+
+        Creates separate mosaics for each projection/UTM zone to ensure proper alignment.
+        """
+        selected_items = self.granule_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "Error", "No granules selected")
+            return
+
+        if len(selected_items) < 1:
+            QMessageBox.warning(self, "Error", "Select at least one granule for mosaic")
+            return
+
+        # Get the selected layer type - extract just the layer suffix (e.g., B01_WTR.tif)
+        layer_filename = self.layer_combo.currentText()
+        if not layer_filename or layer_filename == "No raster files available":
+            QMessageBox.warning(self, "Error", "No layer type selected")
+            return
+
+        # Extract the layer band identifier from the filename
+        # OPERA filenames follow pattern: OPERA_L3_DSWx-HLS_T12STF_..._v1.1_B01_WTR.tif
+        # We want to extract "B01_WTR" to match across different granules
+        import re
+
+        # Try to extract the band identifier (e.g., "B01_WTR", "B02_BWTR", etc.)
+        # Pattern: _B followed by digits, then underscore, then letters, then .tif
+        match = re.search(r"_(B\d+_[A-Za-z0-9]+)\.tif$", layer_filename, re.IGNORECASE)
+        if match:
+            layer_band = match.group(1)  # e.g., "B01_WTR"
+        else:
+            # Fallback: try to get the last two underscore-separated parts before .tif
+            parts = layer_filename.replace(".tif", "").split("_")
+            if len(parts) >= 2:
+                layer_band = "_".join(parts[-2:])  # e.g., "B01_WTR"
+            else:
+                layer_band = parts[-1] if parts else layer_filename
+
+        # Show busy state
+        self._set_busy_state(True)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.status_label.setText(
+            f"Creating mosaic from {len(selected_items)} granules..."
+        )
+        self.status_label.setStyleSheet("color: blue; font-size: 10px;")
+        self.output_text.append(
+            f"\nCreating mosaic from {len(selected_items)} granules..."
+        )
+        self.output_text.append(f"Layer band: {layer_band}")
+        QApplication.processEvents()
+
+        try:
+            from osgeo import gdal, osr
+
+            # Setup GDAL for Earthdata access
+            self.output_text.append("Setting up cloud access...")
+            QApplication.processEvents()
+
+            success, error = setup_gdal_for_earthdata()
+            if not success:
+                raise Exception(f"Failed to setup cloud access: {error}")
+
+            # Enable GDAL errors for debugging
+            gdal.UseExceptions()
+
+            # Collect URLs for all selected granules, grouped by CRS
+            # Dictionary: CRS WKT -> list of (vsi_path, crs_name)
+            files_by_crs = {}
+            not_found = []
+            access_failed = []
+
+            total_granules = len(selected_items)
+            for idx, item in enumerate(selected_items):
+                granule_index = item.data(Qt.UserRole)
+                if granule_index is None or granule_index >= len(self._results):
+                    continue
+
+                granule = self._results[granule_index]
+                granule_id = item.text()
+                data_links = (
+                    granule.data_links() if hasattr(granule, "data_links") else []
+                )
+
+                self.status_label.setText(
+                    f"Checking file {idx + 1}/{total_granules}..."
+                )
+                QApplication.processEvents()
+
+                # Find the matching layer file by band identifier
+                found = False
+                for link in data_links:
+                    # Check if this link contains our band identifier followed by .tif
+                    # Use case-insensitive matching
+                    if (
+                        f"_{layer_band}.tif".lower() in link.lower()
+                        or link.lower().endswith(f"{layer_band}.tif".lower())
+                    ):
+                        vsi_path = get_vsicurl_path(link)
+
+                        # Verify the file is accessible and get its CRS
+                        try:
+                            ds = gdal.Open(vsi_path)
+                            if ds is not None:
+                                # Get the CRS
+                                proj = ds.GetProjection()
+                                srs = osr.SpatialReference()
+                                srs.ImportFromWkt(proj)
+
+                                # Get a readable CRS name (e.g., "UTM zone 12N")
+                                crs_name = (
+                                    srs.GetName() if srs.GetName() else "Unknown CRS"
+                                )
+                                # Extract just the zone info for cleaner naming
+                                zone_match = re.search(
+                                    r"(UTM zone \d+[NS]?)", crs_name, re.IGNORECASE
+                                )
+                                if zone_match:
+                                    crs_short = zone_match.group(1)
+                                else:
+                                    crs_short = crs_name[:30]
+
+                                # Use EPSG code as key if available, otherwise use WKT
+                                epsg = srs.GetAuthorityCode(None)
+                                if epsg:
+                                    crs_key = f"EPSG:{epsg}"
+                                else:
+                                    crs_key = proj[:100]  # Use truncated WKT as key
+
+                                # Group by CRS
+                                if crs_key not in files_by_crs:
+                                    files_by_crs[crs_key] = {
+                                        "name": crs_short,
+                                        "paths": [],
+                                    }
+                                files_by_crs[crs_key]["paths"].append(vsi_path)
+
+                                self.output_text.append(
+                                    f"  [{idx + 1}] OK: {os.path.basename(link)} ({crs_short})"
+                                )
+                                ds = None  # Close dataset
+                                found = True
+                            else:
+                                access_failed.append(os.path.basename(link))
+                                self.output_text.append(
+                                    f"  [{idx + 1}] FAILED: {os.path.basename(link)} (cannot open)"
+                                )
+                        except Exception as e:
+                            access_failed.append(os.path.basename(link))
+                            self.output_text.append(
+                                f"  [{idx + 1}] FAILED: {os.path.basename(link)} ({str(e)[:50]})"
+                            )
+                        break
+
+                if not found and granule_id not in [
+                    f[:30] + "..." for f in access_failed
+                ]:
+                    not_found.append(granule_id[:40])
+                    self.output_text.append(
+                        f"  [{idx + 1}] NOT FOUND: No {layer_band} in granule"
+                    )
+
+                QApplication.processEvents()
+
+            if not_found:
+                self.output_text.append(
+                    f"\nWarning: {len(not_found)} granules missing layer {layer_band}"
+                )
+            if access_failed:
+                self.output_text.append(
+                    f"Warning: {len(access_failed)} files failed to open"
+                )
+
+            total_files = sum(len(v["paths"]) for v in files_by_crs.values())
+            if total_files == 0:
+                raise Exception("No accessible files found for selected granules")
+
+            self.output_text.append(
+                f"\nSuccessfully verified {total_files} of {total_granules} files"
+            )
+            self.output_text.append(
+                f"Found {len(files_by_crs)} different projection(s)"
+            )
+            QApplication.processEvents()
+
+            # Create separate VRT for each CRS group
+            temp_dir = tempfile.gettempdir()
+            layers_created = []
+            combined_extent = None
+
+            for crs_idx, (crs_key, crs_data) in enumerate(files_by_crs.items()):
+                crs_name = crs_data["name"]
+                vsi_paths = crs_data["paths"]
+
+                self.status_label.setText(
+                    f"Building mosaic {crs_idx + 1}/{len(files_by_crs)} ({crs_name})..."
+                )
+                self.output_text.append(
+                    f"\nBuilding mosaic for {crs_name} ({len(vsi_paths)} files)..."
+                )
+                QApplication.processEvents()
+
+                # Create VRT for this CRS group
+                vrt_filename = (
+                    f"opera_mosaic_{crs_name.replace(' ', '_').replace('/', '_')}.vrt"
+                )
+                vrt_path = os.path.join(temp_dir, vrt_filename)
+
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg="nearest",
+                    addAlpha=False,
+                    srcNodata=255,
+                    VRTNodata=255,
+                )
+
+                vrt_ds = gdal.BuildVRT(vrt_path, vsi_paths, options=vrt_options)
+                if vrt_ds is None:
+                    gdal_error = gdal.GetLastErrorMsg()
+                    self.output_text.append(
+                        f"  Warning: Failed to build VRT for {crs_name}: {gdal_error}"
+                    )
+                    continue
+
+                # Get VRT info
+                vrt_width = vrt_ds.RasterXSize
+                vrt_height = vrt_ds.RasterYSize
+                vrt_ds.FlushCache()
+                vrt_ds = None
+
+                self.output_text.append(
+                    f"  VRT created: {vrt_width}x{vrt_height} pixels"
+                )
+
+                # Load VRT as raster layer
+                layer_name = f"OPERA Mosaic - {crs_name} ({len(vsi_paths)} scenes)"
+                layer = QgsRasterLayer(vrt_path, layer_name)
+
+                if layer.isValid():
+                    QgsProject.instance().addMapLayer(layer)
+                    layers_created.append(layer)
+
+                    # Track combined extent (transform to canvas CRS)
+                    layer_extent = layer.extent()
+                    layer_crs = layer.crs()
+                    canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+
+                    if (
+                        layer_crs.isValid()
+                        and canvas_crs.isValid()
+                        and layer_crs != canvas_crs
+                    ):
+                        transform = QgsCoordinateTransform(
+                            layer_crs, canvas_crs, QgsProject.instance()
+                        )
+                        layer_extent = transform.transformBoundingBox(layer_extent)
+
+                    if combined_extent is None:
+                        combined_extent = QgsRectangle(layer_extent)
+                    else:
+                        combined_extent.combineExtentWith(layer_extent)
+
+                    self.output_text.append(f"  Layer added: {layer_name}")
+                else:
+                    self.output_text.append(
+                        f"  Warning: Failed to load VRT layer for {crs_name}"
+                    )
+
+                QApplication.processEvents()
+
+            if not layers_created:
+                raise Exception("Failed to create any mosaic layers")
+
+            # Zoom to combined extent
+            if combined_extent:
+                combined_extent.scale(1.05)  # Add 5% buffer
+                self.iface.mapCanvas().setExtent(combined_extent)
+                self.iface.mapCanvas().refresh()
+
+            self.status_label.setText(f"Created {len(layers_created)} mosaic layer(s)")
+            self.status_label.setStyleSheet("color: green; font-size: 10px;")
+            self.output_text.append(
+                f"\nSuccessfully created {len(layers_created)} mosaic layer(s) with {total_files} scenes total!"
+            )
+
+        except Exception as e:
+            self.status_label.setText("Mosaic failed")
+            self.status_label.setStyleSheet("color: red; font-size: 10px;")
+            self.output_text.append(f"\nError creating mosaic: {str(e)}")
+            QMessageBox.critical(
+                self, "Mosaic Error", f"Failed to create mosaic:\n{str(e)}"
+            )
+
+        finally:
+            self._set_busy_state(False)
+            self.progress_bar.setVisible(False)
+
     def _display_footprints(self):
         """Display search result footprints as a vector layer."""
         if self._gdf is None:
@@ -1032,13 +1404,16 @@ class OperaDockWidget(QDockWidget):
         self.max_items_spin.setValue(50)
         self.dataset_combo.setCurrentIndex(0)
 
-        self.granule_combo.clear()
-        self.granule_combo.setEnabled(False)
+        self.granule_list.clear()
+        self.granule_list.setEnabled(False)
+        self.select_all_btn.setEnabled(False)
+        self.deselect_all_btn.setEnabled(False)
         self.layer_combo.clear()
         self.layer_combo.setEnabled(False)
 
         self.display_single_btn.setEnabled(False)
         self.display_footprints_btn.setEnabled(False)
+        self.display_mosaic_btn.setEnabled(False)
 
         self.output_text.clear()
         self.status_label.setText("Ready to search")
