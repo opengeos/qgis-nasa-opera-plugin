@@ -325,18 +325,18 @@ class DownloadRasterWorker(QThread):
 
 def setup_gdal_for_earthdata():
     """Configure GDAL environment for accessing NASA Earthdata via S3.
-    
+
     Returns:
         tuple: (success, vsicurl_prefix) or (False, error_message)
     """
     try:
         import earthaccess
         from osgeo import gdal
-        
+
         # Authenticate and get S3 credentials
         earthaccess.login(persist=True)
         s3_credentials = earthaccess.get_s3_credentials(daac="PODAAC")
-        
+
         # Configure GDAL for S3 access
         gdal.SetConfigOption("AWS_ACCESS_KEY_ID", s3_credentials["accessKeyId"])
         gdal.SetConfigOption("AWS_SECRET_ACCESS_KEY", s3_credentials["secretAccessKey"])
@@ -344,23 +344,27 @@ def setup_gdal_for_earthdata():
         gdal.SetConfigOption("AWS_REGION", "us-west-2")
         gdal.SetConfigOption("AWS_S3_ENDPOINT", "s3.us-west-2.amazonaws.com")
         gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.TIF,.tiff,.TIFF")
+        gdal.SetConfigOption(
+            "CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.TIF,.tiff,.TIFF"
+        )
         gdal.SetConfigOption("GDAL_HTTP_UNSAFESSL", "YES")
-        gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", os.path.expanduser("~/cookies.txt"))
+        gdal.SetConfigOption(
+            "GDAL_HTTP_COOKIEFILE", os.path.expanduser("~/cookies.txt")
+        )
         gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", os.path.expanduser("~/cookies.txt"))
-        
+
         return True, None
-        
+
     except Exception as e:
         return False, str(e)
 
 
 def get_vsicurl_path(url: str) -> str:
     """Convert an S3 or HTTPS URL to a GDAL VSICURL/VSIS3 path.
-    
+
     Args:
         url: The S3 or HTTPS URL to the file
-        
+
     Returns:
         The VSICURL or VSIS3 path for GDAL
     """
@@ -757,10 +761,10 @@ class OperaDockWidget(QDockWidget):
 
         granule = self._results[granule_index]
         layer_name = self.layer_combo.currentText().replace(".tif", "")
-        
+
         # Check if it's a COG (GeoTIFF) file - try streaming first
-        is_tif = url.lower().endswith(('.tif', '.tiff'))
-        
+        is_tif = url.lower().endswith((".tif", ".tiff"))
+
         if is_tif:
             # Show waiting state
             self._set_busy_state(True)
@@ -770,19 +774,19 @@ class OperaDockWidget(QDockWidget):
             self.progress_bar.setVisible(True)
             self.progress_bar.setRange(0, 0)  # Indeterminate
             QApplication.processEvents()  # Update UI
-            
+
             # Try cloud access first
             success = self._try_load_cog(url, layer_name)
-            
+
             if success:
                 self._set_busy_state(False)
                 self.progress_bar.setVisible(False)
                 return  # Successfully loaded via cloud access
-            
+
             # If cloud access failed, fall back to download
             self.output_text.append("Cloud access failed, falling back to download...")
             QApplication.processEvents()
-        
+
         # For non-COG files or if COG access failed, download the file
         self._set_busy_state(True)
         self.status_label.setText(f"Downloading {layer_name}...")
@@ -813,7 +817,7 @@ class OperaDockWidget(QDockWidget):
 
     def _set_busy_state(self, busy: bool):
         """Set the UI to busy/waiting state.
-        
+
         Args:
             busy: True to show waiting cursor, False to restore normal cursor
         """
@@ -828,11 +832,11 @@ class OperaDockWidget(QDockWidget):
 
     def _try_load_cog(self, url: str, layer_name: str) -> bool:
         """Try to load a Cloud-Optimized GeoTIFF directly via streaming.
-        
+
         Args:
             url: The URL to the COG file
             layer_name: The name for the layer
-            
+
         Returns:
             True if successful, False otherwise
         """
@@ -840,30 +844,30 @@ class OperaDockWidget(QDockWidget):
             # Setup GDAL for Earthdata access
             self.status_label.setText("Setting up cloud access...")
             QApplication.processEvents()
-            
+
             success, error = setup_gdal_for_earthdata()
             if not success:
                 self.output_text.append(f"Failed to setup cloud access: {error}")
                 return False
-            
+
             # Get the VSICURL/VSIS3 path
             vsi_path = get_vsicurl_path(url)
             self.output_text.append(f"Trying: {vsi_path}")
-            
+
             self.status_label.setText(f"Streaming COG: {layer_name}...")
             QApplication.processEvents()
-            
+
             # Try to create the raster layer
             layer = QgsRasterLayer(vsi_path, layer_name)
-            
+
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
-                
+
                 # Zoom to layer extent with CRS transformation
                 layer_extent = layer.extent()
                 layer_crs = layer.crs()
                 canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-                
+
                 if (
                     layer_crs.isValid()
                     and canvas_crs.isValid()
@@ -873,10 +877,10 @@ class OperaDockWidget(QDockWidget):
                         layer_crs, canvas_crs, QgsProject.instance()
                     )
                     layer_extent = transform.transformBoundingBox(layer_extent)
-                
+
                 self.iface.mapCanvas().setExtent(layer_extent)
                 self.iface.mapCanvas().refresh()
-                
+
                 self.status_label.setText(f"Loaded (streaming): {layer_name}")
                 self.status_label.setStyleSheet("color: green; font-size: 10px;")
                 self.output_text.append(f"Successfully loaded COG via cloud streaming!")
@@ -884,7 +888,7 @@ class OperaDockWidget(QDockWidget):
             else:
                 self.output_text.append("Layer not valid via cloud access")
                 return False
-                
+
         except Exception as e:
             self.output_text.append(f"Cloud access error: {str(e)}")
             return False
