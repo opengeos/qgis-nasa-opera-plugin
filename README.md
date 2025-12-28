@@ -5,8 +5,6 @@
 
 A QGIS plugin for searching and visualizing NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products.
 
-![NASA OPERA Plugin](https://www.jpl.nasa.gov/images/opera-logo-color.png)
-
 ## About NASA OPERA
 
 OPERA is a NASA project that provides analysis-ready data products derived from satellite observations. The project produces near-real-time and systematic global data products using optical and SAR satellite imagery.
