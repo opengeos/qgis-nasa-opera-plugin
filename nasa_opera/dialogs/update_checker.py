@@ -28,7 +28,6 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtGui import QFont
 
-
 # GitHub URLs for the plugin
 GITHUB_REPO = "opengeos/qgis-nasa-opera-plugin"
 GITHUB_BRANCH = "main"
@@ -284,8 +283,7 @@ class UpdateCheckerDialog(QDialog):
         button_layout = QHBoxLayout()
 
         self.check_btn = QPushButton("Check for Updates")
-        self.check_btn.setStyleSheet(
-            """
+        self.check_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1976D2;
                 color: white;
@@ -296,8 +294,7 @@ class UpdateCheckerDialog(QDialog):
             QPushButton:hover {
                 background-color: #1565C0;
             }
-        """
-        )
+        """)
         self.check_btn.clicked.connect(self.check_for_updates)
         button_layout.addWidget(self.check_btn)
 

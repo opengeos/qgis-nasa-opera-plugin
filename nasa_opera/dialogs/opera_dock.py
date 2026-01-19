@@ -59,7 +59,6 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QVariant
 
-
 # NASA OPERA datasets
 OPERA_DATASETS = {
     "OPERA_L3_DSWX-HLS_V1": {
@@ -499,8 +498,7 @@ class OperaDockWidget(QDockWidget):
         # Search button
         search_btn_layout = QHBoxLayout()
         self.search_btn = QPushButton("🔍 Search")
-        self.search_btn.setStyleSheet(
-            """
+        self.search_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1976D2;
                 color: white;
@@ -518,8 +516,7 @@ class OperaDockWidget(QDockWidget):
             QPushButton:disabled {
                 background-color: #BDBDBD;
             }
-        """
-        )
+        """)
         self.search_btn.clicked.connect(self._search)
         search_btn_layout.addWidget(self.search_btn)
 

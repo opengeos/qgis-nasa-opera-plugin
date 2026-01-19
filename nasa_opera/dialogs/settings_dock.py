@@ -88,8 +88,7 @@ class SettingsDockWidget(QDockWidget):
         button_layout = QHBoxLayout()
 
         self.save_btn = QPushButton("Save Settings")
-        self.save_btn.setStyleSheet(
-            """
+        self.save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
                 color: white;
@@ -100,8 +99,7 @@ class SettingsDockWidget(QDockWidget):
             QPushButton:hover {
                 background-color: #45a049;
             }
-        """
-        )
+        """)
         self.save_btn.clicked.connect(self._save_settings)
         button_layout.addWidget(self.save_btn)
 
