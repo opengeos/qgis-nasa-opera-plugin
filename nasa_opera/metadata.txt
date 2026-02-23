@@ -2,7 +2,7 @@
 name=NASA OPERA
 qgisMinimumVersion=3.28
 description=Search and visualize NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products.
-version=0.2.0
+version=0.3.0
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -46,6 +46,8 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.3.0
+        - Enhance search UI with interactive features and download options (#11)
     0.2.0
         - Fix Earthdata credential test on fresh installs (#8)
         - Fix mosaicking issues on RTC tiles (#10)
