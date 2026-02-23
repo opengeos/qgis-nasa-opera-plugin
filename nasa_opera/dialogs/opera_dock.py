@@ -38,11 +38,10 @@ from qgis.PyQt.QtWidgets import (
     QSplitter,
     QSizePolicy,
     QApplication,
-    QListWidget,
-    QListWidgetItem,
     QAbstractItemView,
+    QFileDialog,
 )
-from qgis.PyQt.QtGui import QFont, QCursor
+from qgis.PyQt.QtGui import QFont, QCursor, QColor
 from qgis.core import (
     QgsProject,
     QgsVectorLayer,
@@ -56,9 +55,11 @@ from qgis.core import (
     QgsFields,
     QgsWkbTypes,
     QgsMapLayerType,
+    QgsPointXY,
     Qgis,
 )
 from qgis.PyQt.QtCore import QVariant
+from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand
 
 # NASA OPERA datasets
 OPERA_DATASETS = {
@@ -326,6 +327,122 @@ class DownloadRasterWorker(QThread):
             self.error.emit(str(e))
 
 
+class DownloadGranulesWorker(QThread):
+    """Worker thread for downloading multiple granules' data files."""
+
+    progress = pyqtSignal(str)
+    file_downloaded = pyqtSignal(str, int, int)  # file_path, current, total
+    finished = pyqtSignal(list)  # list of downloaded file paths
+    error = pyqtSignal(str)
+
+    def __init__(self, granules, download_dir, layer_filter=None):
+        """Initialize the download worker.
+
+        Args:
+            granules: List of earthaccess granule objects to download.
+            download_dir: Directory path to save downloaded files.
+            layer_filter: Optional layer band suffix to filter downloads
+                (e.g. "B01_WTR"). When set, only files matching this band
+                are downloaded. When None, all files are downloaded.
+        """
+        super().__init__()
+        self.granules = granules
+        self.download_dir = download_dir
+        self.layer_filter = layer_filter
+        self._cancelled = False
+
+    def cancel(self):
+        """Request cancellation of the download."""
+        self._cancelled = True
+
+    def run(self):
+        """Execute the download of all granules."""
+        try:
+            import earthaccess
+
+            self.progress.emit("Authenticating with NASA Earthdata...")
+            earthaccess.login(persist=True)
+
+            os.makedirs(self.download_dir, exist_ok=True)
+
+            all_downloaded = []
+            total = len(self.granules)
+
+            if self.layer_filter:
+                # Single-layer mode: collect matching URLs, download them directly
+                urls = []
+                for i, granule in enumerate(self.granules):
+                    granule_id = granule.get("meta", {}).get(
+                        "native-id", f"Granule {i + 1}"
+                    )
+                    data_links = (
+                        granule.data_links() if hasattr(granule, "data_links") else []
+                    )
+                    found = False
+                    for link in data_links:
+                        if (
+                            f"_{self.layer_filter}.tif".lower() in link.lower()
+                            or link.lower().endswith(
+                                f"_{self.layer_filter}.tif".lower()
+                            )
+                        ):
+                            urls.append(link)
+                            found = True
+                            break
+                    if not found:
+                        self.progress.emit(
+                            f"  Warning: No {self.layer_filter} layer "
+                            f"found for {granule_id}"
+                        )
+
+                if not urls:
+                    self.error.emit(
+                        f"No {self.layer_filter} files found in selected granules"
+                    )
+                    return
+
+                self.progress.emit(f"Downloading {len(urls)} files...")
+                downloaded = earthaccess.download(
+                    urls, local_path=self.download_dir, threads=1
+                )
+                for i, f in enumerate(downloaded):
+                    if self._cancelled:
+                        self.progress.emit("Download cancelled by user.")
+                        break
+                    f_str = str(f)
+                    all_downloaded.append(f_str)
+                    self.file_downloaded.emit(f_str, i + 1, len(urls))
+            else:
+                # All-layers mode: download entire granule
+                for i, granule in enumerate(self.granules):
+                    if self._cancelled:
+                        self.progress.emit("Download cancelled by user.")
+                        break
+
+                    granule_id = granule.get("meta", {}).get(
+                        "native-id", f"Granule {i + 1}"
+                    )
+                    self.progress.emit(f"Downloading {i + 1}/{total}: {granule_id}...")
+
+                    try:
+                        downloaded = earthaccess.download(
+                            [granule], local_path=self.download_dir, threads=1
+                        )
+                        for f in downloaded:
+                            f_str = str(f)
+                            all_downloaded.append(f_str)
+                            self.file_downloaded.emit(f_str, i + 1, total)
+                    except Exception as e:
+                        self.progress.emit(
+                            f"Warning: Failed to download {granule_id}: {str(e)}"
+                        )
+
+            self.finished.emit(all_downloaded)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 def setup_gdal_for_earthdata():
     """Configure GDAL environment for accessing NASA Earthdata via S3.
 
@@ -383,6 +500,100 @@ def get_vsicurl_path(url: str) -> str:
         return url
 
 
+class RectangleMapTool(QgsMapToolEmitPoint):
+    """Map tool for drawing a rectangle on the canvas.
+
+    Emits a rectangleCreated signal with the bounding box coordinates
+    when the user finishes drawing.
+    """
+
+    rectangleCreated = pyqtSignal(QgsRectangle)
+
+    def __init__(self, canvas):
+        """Initialize the rectangle map tool.
+
+        Args:
+            canvas: The QgsMapCanvas to draw on.
+        """
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.rubber_band = None
+        self.start_point = None
+        self.end_point = None
+        self.is_drawing = False
+
+    def canvasPressEvent(self, event):
+        """Handle mouse press to start drawing the rectangle.
+
+        Args:
+            event: The QgsMapMouseEvent.
+        """
+        self.start_point = self.toMapCoordinates(event.pos())
+        self.end_point = self.start_point
+        self.is_drawing = True
+
+        # Create rubber band for visual feedback
+        if self.rubber_band is not None:
+            self.canvas.scene().removeItem(self.rubber_band)
+        self.rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+        self.rubber_band.setColor(QColor(255, 0, 0, 100))
+        self.rubber_band.setWidth(2)
+        self._update_rubber_band()
+
+    def canvasMoveEvent(self, event):
+        """Handle mouse move to update the rectangle preview.
+
+        Args:
+            event: The QgsMapMouseEvent.
+        """
+        if not self.is_drawing:
+            return
+        self.end_point = self.toMapCoordinates(event.pos())
+        self._update_rubber_band()
+
+    def canvasReleaseEvent(self, event):
+        """Handle mouse release to finalize the rectangle.
+
+        Args:
+            event: The QgsMapMouseEvent.
+        """
+        if not self.is_drawing:
+            return
+        self.end_point = self.toMapCoordinates(event.pos())
+        self.is_drawing = False
+
+        # Clean up rubber band
+        if self.rubber_band is not None:
+            self.canvas.scene().removeItem(self.rubber_band)
+            self.rubber_band = None
+
+        # Create rectangle from start and end points
+        rect = QgsRectangle(self.start_point, self.end_point)
+        rect.normalize()  # Ensure min < max
+
+        if rect.width() > 0 and rect.height() > 0:
+            self.rectangleCreated.emit(rect)
+
+    def _update_rubber_band(self):
+        """Update the rubber band rectangle display."""
+        if self.rubber_band is None:
+            return
+        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+        rect = QgsRectangle(self.start_point, self.end_point)
+        self.rubber_band.addPoint(QgsPointXY(rect.xMinimum(), rect.yMinimum()), False)
+        self.rubber_band.addPoint(QgsPointXY(rect.xMinimum(), rect.yMaximum()), False)
+        self.rubber_band.addPoint(QgsPointXY(rect.xMaximum(), rect.yMaximum()), False)
+        self.rubber_band.addPoint(QgsPointXY(rect.xMaximum(), rect.yMinimum()), True)
+        self.rubber_band.show()
+
+    def deactivate(self):
+        """Clean up when the tool is deactivated."""
+        if self.rubber_band is not None:
+            self.canvas.scene().removeItem(self.rubber_band)
+            self.rubber_band = None
+        super().deactivate()
+
+
 class OperaDockWidget(QDockWidget):
     """NASA OPERA search and visualization dock widget."""
 
@@ -401,6 +612,13 @@ class OperaDockWidget(QDockWidget):
         self._results = []
         self._gdf = None
         self._footprint_layer = None
+
+        # Rectangle drawing tool
+        self._rectangle_tool = None
+        self._previous_map_tool = None
+
+        # Selection sync guard flag
+        self._sync_in_progress = False
 
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
 
@@ -424,7 +642,7 @@ class OperaDockWidget(QDockWidget):
         header_font.setBold(True)
         header_label.setFont(header_font)
         header_label.setAlignment(Qt.AlignCenter)
-        header_label.setStyleSheet("color: #1565C0; padding: 5px;")
+        header_label.setStyleSheet("color: #64B5F6; padding: 5px;")
         layout.addWidget(header_label)
 
         # Dataset selection group
@@ -444,7 +662,7 @@ class OperaDockWidget(QDockWidget):
         # Dataset description
         self.dataset_desc_label = QLabel()
         self.dataset_desc_label.setWordWrap(True)
-        self.dataset_desc_label.setStyleSheet("color: gray; font-size: 10px;")
+        self.dataset_desc_label.setStyleSheet("color: #B0BEC5; font-size: 10px;")
         dataset_layout.addRow(self.dataset_desc_label)
 
         layout.addWidget(dataset_group)
@@ -469,9 +687,12 @@ class OperaDockWidget(QDockWidget):
         bbox_btn_layout = QHBoxLayout()
         self.use_extent_btn = QPushButton("Use Map Extent")
         self.use_extent_btn.clicked.connect(self._use_map_extent)
+        self.draw_rect_btn = QPushButton("Draw Rectangle")
+        self.draw_rect_btn.clicked.connect(self._activate_draw_rectangle)
         self.clear_bbox_btn = QPushButton("Clear")
-        self.clear_bbox_btn.clicked.connect(lambda: self.bbox_input.clear())
+        self.clear_bbox_btn.clicked.connect(self._clear_bbox)
         bbox_btn_layout.addWidget(self.use_extent_btn)
+        bbox_btn_layout.addWidget(self.draw_rect_btn)
         bbox_btn_layout.addWidget(self.clear_bbox_btn)
         search_layout.addRow("", bbox_btn_layout)
 
@@ -504,7 +725,6 @@ class OperaDockWidget(QDockWidget):
                 background-color: #1976D2;
                 color: white;
                 font-weight: bold;
-                padding: 4px 12px;
                 border-radius: 4px;
                 border: none;
             }
@@ -535,7 +755,9 @@ class OperaDockWidget(QDockWidget):
 
         # Status label
         self.status_label = QLabel("Ready to search")
-        self.status_label.setStyleSheet("color: gray; font-size: 10px; padding: 2px;")
+        self.status_label.setStyleSheet(
+            "color: #B0BEC5; font-size: 10px; padding: 2px;"
+        )
         layout.addWidget(self.status_label)
 
         # Results group
@@ -543,18 +765,29 @@ class OperaDockWidget(QDockWidget):
         results_layout = QVBoxLayout(results_group)
         results_layout.setSpacing(4)
 
-        # Granule list with multi-select
+        # Granule table with multi-select
         granule_label = QLabel("Granules (select one or more):")
         results_layout.addWidget(granule_label)
 
-        self.granule_list = QListWidget()
-        self.granule_list.setEnabled(False)
-        self.granule_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.granule_list.setMaximumHeight(100)
-        self.granule_list.itemSelectionChanged.connect(
+        self.granule_table = QTableWidget()
+        self.granule_table.setEnabled(False)
+        self.granule_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.granule_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.granule_table.setColumnCount(4)
+        self.granule_table.setHorizontalHeaderLabels(
+            ["Granule ID", "Begin Date", "End Date", "Links"]
+        )
+        self.granule_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Interactive
+        )
+        self.granule_table.horizontalHeader().setStretchLastSection(True)
+        self.granule_table.setSortingEnabled(True)
+        self.granule_table.setMinimumHeight(120)
+        self.granule_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.granule_table.itemSelectionChanged.connect(
             self._on_granule_selection_changed
         )
-        results_layout.addWidget(self.granule_list)
+        results_layout.addWidget(self.granule_table)
 
         # Select all / Deselect all buttons
         select_btn_layout = QHBoxLayout()
@@ -576,23 +809,13 @@ class OperaDockWidget(QDockWidget):
         layer_layout.addRow("Layer:", self.layer_combo)
         results_layout.addLayout(layer_layout)
 
-        # Display buttons - row 1
-        display_btn_layout1 = QHBoxLayout()
+        # Display buttons (Single + Mosaic)
+        display_btn_layout = QHBoxLayout()
 
         self.display_single_btn = QPushButton("Display Single")
         self.display_single_btn.setEnabled(False)
         self.display_single_btn.clicked.connect(self._display_single)
-        display_btn_layout1.addWidget(self.display_single_btn)
-
-        self.display_footprints_btn = QPushButton("Show Footprints")
-        self.display_footprints_btn.setEnabled(False)
-        self.display_footprints_btn.clicked.connect(self._display_footprints)
-        display_btn_layout1.addWidget(self.display_footprints_btn)
-
-        results_layout.addLayout(display_btn_layout1)
-
-        # Display buttons - row 2 (Mosaic)
-        display_btn_layout2 = QHBoxLayout()
+        display_btn_layout.addWidget(self.display_single_btn)
 
         self.display_mosaic_btn = QPushButton("Display Mosaic")
         self.display_mosaic_btn.setEnabled(False)
@@ -600,9 +823,30 @@ class OperaDockWidget(QDockWidget):
             "Create a virtual mosaic from selected granules"
         )
         self.display_mosaic_btn.clicked.connect(self._display_mosaic)
-        display_btn_layout2.addWidget(self.display_mosaic_btn)
+        display_btn_layout.addWidget(self.display_mosaic_btn)
 
-        results_layout.addLayout(display_btn_layout2)
+        results_layout.addLayout(display_btn_layout)
+
+        # Download buttons
+        download_btn_layout = QHBoxLayout()
+
+        self.download_single_layer_btn = QPushButton("Download Selected (Single Layer)")
+        self.download_single_layer_btn.setEnabled(False)
+        self.download_single_layer_btn.setToolTip(
+            "Download only the selected layer type for each granule"
+        )
+        self.download_single_layer_btn.clicked.connect(self._download_single_layer)
+        download_btn_layout.addWidget(self.download_single_layer_btn)
+
+        self.download_all_layers_btn = QPushButton("Download Selected (All Layers)")
+        self.download_all_layers_btn.setEnabled(False)
+        self.download_all_layers_btn.setToolTip(
+            "Download all layer files for each selected granule"
+        )
+        self.download_all_layers_btn.clicked.connect(self._download_all_layers)
+        download_btn_layout.addWidget(self.download_all_layers_btn)
+
+        results_layout.addLayout(download_btn_layout)
 
         layout.addWidget(results_group)
 
@@ -620,9 +864,6 @@ class OperaDockWidget(QDockWidget):
         output_layout.addWidget(self.output_text)
 
         layout.addWidget(output_group)
-
-        # Stretch at the end
-        layout.addStretch()
 
         # Initialize dataset description
         self._on_dataset_changed(0)
@@ -656,6 +897,60 @@ class OperaDockWidget(QDockWidget):
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to get map extent: {str(e)}")
 
+    def _activate_draw_rectangle(self):
+        """Activate the rectangle drawing tool on the map canvas."""
+        canvas = self.iface.mapCanvas()
+
+        # Save the current map tool to restore later
+        self._previous_map_tool = canvas.mapTool()
+
+        # Create the rectangle tool if it doesn't exist
+        if self._rectangle_tool is None:
+            self._rectangle_tool = RectangleMapTool(canvas)
+            self._rectangle_tool.rectangleCreated.connect(self._on_rectangle_drawn)
+
+        canvas.setMapTool(self._rectangle_tool)
+        self.status_label.setText("Draw a rectangle on the map...")
+        self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
+
+    def _on_rectangle_drawn(self, rect):
+        """Handle completion of rectangle drawing.
+
+        Args:
+            rect: QgsRectangle with the drawn extent.
+        """
+        canvas = self.iface.mapCanvas()
+
+        # Transform to WGS84
+        source_crs = canvas.mapSettings().destinationCrs()
+        dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+
+        if source_crs != dest_crs:
+            transform = QgsCoordinateTransform(
+                source_crs, dest_crs, QgsProject.instance()
+            )
+            rect = transform.transformBoundingBox(rect)
+
+        bbox_str = (
+            f"{rect.xMinimum():.6f}, {rect.yMinimum():.6f}, "
+            f"{rect.xMaximum():.6f}, {rect.yMaximum():.6f}"
+        )
+        self.bbox_input.setText(bbox_str)
+
+        self.status_label.setText("Rectangle drawn - bbox set")
+        self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
+
+        # Restore previous map tool
+        if self._previous_map_tool is not None:
+            canvas.setMapTool(self._previous_map_tool)
+        else:
+            canvas.unsetMapTool(self._rectangle_tool)
+
+    def _clear_bbox(self):
+        """Clear the bounding box input and remove footprint layer."""
+        self.bbox_input.clear()
+        self._remove_footprint_layer()
+
     def _search(self):
         """Execute the search."""
         # Get parameters
@@ -687,9 +982,10 @@ class OperaDockWidget(QDockWidget):
 
         # Disable UI during search
         self.search_btn.setEnabled(False)
+        self.progress_bar.setRange(0, 0)  # Indeterminate
         self.progress_bar.setVisible(True)
         self.status_label.setText("Searching...")
-        self.status_label.setStyleSheet("color: blue; font-size: 10px;")
+        self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
         self.output_text.clear()
 
         # Create and start worker
@@ -720,33 +1016,58 @@ class OperaDockWidget(QDockWidget):
 
         if len(results) == 0:
             self.status_label.setText("No results found")
-            self.status_label.setStyleSheet("color: orange; font-size: 10px;")
+            self.status_label.setStyleSheet("color: #FFA726; font-size: 10px;")
             self.output_text.append("No granules found matching the search criteria.")
             return
 
         self.status_label.setText(f"Found {len(results)} granules")
-        self.status_label.setStyleSheet("color: green; font-size: 10px;")
+        self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
         self.output_text.append(f"\nFound {len(results)} granules.")
         self.output_text.append("Select granule(s) from the list to display.")
 
-        # Populate granule list
-        self.granule_list.clear()
-        self.granule_list.setEnabled(True)
+        # Populate granule table
+        self.granule_table.setSortingEnabled(False)  # Disable during population
+        self.granule_table.setRowCount(0)
+        self.granule_table.setEnabled(True)
         self.select_all_btn.setEnabled(True)
         self.deselect_all_btn.setEnabled(True)
 
         for i, result in enumerate(results):
-            native_id = result.get("meta", {}).get("native-id", f"Granule {i+1}")
-            item = QListWidgetItem(native_id)
-            item.setData(Qt.UserRole, i)  # Store index
-            self.granule_list.addItem(item)
+            row = self.granule_table.rowCount()
+            self.granule_table.insertRow(row)
 
-        # Select first item by default
-        if self.granule_list.count() > 0:
-            self.granule_list.item(0).setSelected(True)
+            native_id = result.get("meta", {}).get("native-id", f"Granule {i + 1}")
+            id_item = QTableWidgetItem(native_id)
+            id_item.setData(Qt.UserRole, i)  # Store granule index
+            id_item.setToolTip(native_id)
+            self.granule_table.setItem(row, 0, id_item)
 
-        # Enable buttons
-        self.display_footprints_btn.setEnabled(gdf is not None)
+            # Get temporal info and links from GeoDataFrame if available
+            begin_date = ""
+            end_date = ""
+            num_links = 0
+            if gdf is not None and i < len(gdf):
+                begin_date = str(gdf.iloc[i].get("begin_date", ""))[:10]
+                end_date = str(gdf.iloc[i].get("end_date", ""))[:10]
+                num_links = int(gdf.iloc[i].get("num_links", 0))
+
+            self.granule_table.setItem(row, 1, QTableWidgetItem(begin_date))
+            self.granule_table.setItem(row, 2, QTableWidgetItem(end_date))
+
+            links_item = QTableWidgetItem()
+            links_item.setData(Qt.DisplayRole, num_links)  # Numeric sort
+            self.granule_table.setItem(row, 3, links_item)
+
+        self.granule_table.setSortingEnabled(True)  # Re-enable sorting
+        self.granule_table.resizeColumnsToContents()
+
+        # Select first row by default
+        if self.granule_table.rowCount() > 0:
+            self.granule_table.selectRow(0)
+
+        # Auto-show footprints
+        if gdf is not None:
+            self._display_footprints()
 
     def _on_search_error(self, error_msg):
         """Handle search error."""
@@ -754,28 +1075,40 @@ class OperaDockWidget(QDockWidget):
         self.search_btn.setEnabled(True)
 
         self.status_label.setText("Search failed")
-        self.status_label.setStyleSheet("color: red; font-size: 10px;")
+        self.status_label.setStyleSheet("color: #EF5350; font-size: 10px;")
         self.output_text.append(f"\nError: {error_msg}")
 
         QMessageBox.critical(self, "Search Error", f"Failed to search:\n{error_msg}")
 
     def _on_granule_selection_changed(self):
-        """Handle granule selection change in the list widget."""
-        selected_items = self.granule_list.selectedItems()
-        num_selected = len(selected_items)
+        """Handle granule selection change in the table widget."""
+        if self._sync_in_progress:
+            return
+
+        selected_rows = set()
+        for item in self.granule_table.selectedItems():
+            selected_rows.add(item.row())
+        num_selected = len(selected_rows)
 
         # Enable/disable buttons based on selection
         self.display_single_btn.setEnabled(num_selected == 1)
         self.display_mosaic_btn.setEnabled(num_selected >= 1)
+        self.download_single_layer_btn.setEnabled(num_selected >= 1)
+        self.download_all_layers_btn.setEnabled(num_selected >= 1)
 
         if num_selected == 0:
             self.layer_combo.clear()
             self.layer_combo.setEnabled(False)
+            # Clear map selection
+            if self._footprint_layer is not None:
+                self._sync_in_progress = True
+                self._footprint_layer.removeSelection()
+                self._sync_in_progress = False
             return
 
         # Get the first selected granule to populate layer dropdown
-        first_item = selected_items[0]
-        index = first_item.data(Qt.UserRole)
+        first_row = min(selected_rows)
+        index = self.granule_table.item(first_row, 0).data(Qt.UserRole)
 
         if index is None or index >= len(self._results):
             return
@@ -800,13 +1133,79 @@ class OperaDockWidget(QDockWidget):
             self.layer_combo.addItem("No raster files available", None)
             self.layer_combo.setEnabled(False)
 
+        # Sync selection to footprint layer on map
+        self._sync_table_to_map(selected_rows)
+
+    def _sync_table_to_map(self, selected_rows):
+        """Highlight footprints on the map corresponding to selected table rows.
+
+        Args:
+            selected_rows: Set of selected row indices in the table.
+        """
+        if self._footprint_layer is None:
+            return
+        if self._sync_in_progress:
+            return
+
+        self._sync_in_progress = True
+        try:
+            # Map table rows to granule indices, then to feature IDs
+            feature_ids = []
+            for row in selected_rows:
+                item = self.granule_table.item(row, 0)
+                if item is not None:
+                    granule_index = item.data(Qt.UserRole)
+                    if granule_index is not None:
+                        feature_ids.append(granule_index)
+
+            self._footprint_layer.selectByIds(feature_ids)
+        finally:
+            self._sync_in_progress = False
+
+    def _on_footprint_selection_changed(self, selected, deselected, clear_and_select):
+        """Handle selection changes on the footprint layer to sync to table.
+
+        Args:
+            selected: List of newly selected feature IDs.
+            deselected: List of newly deselected feature IDs.
+            clear_and_select: Whether this was a clear-and-select operation.
+        """
+        if self._sync_in_progress:
+            return
+
+        self._sync_in_progress = True
+        try:
+            # Get selected feature IDs from the layer
+            selected_fids = self._footprint_layer.selectedFeatureIds()
+
+            # Build a mapping from granule_index to table row
+            index_to_row = {}
+            for row in range(self.granule_table.rowCount()):
+                item = self.granule_table.item(row, 0)
+                if item is not None:
+                    granule_index = item.data(Qt.UserRole)
+                    if granule_index is not None:
+                        index_to_row[granule_index] = row
+
+            # Select matching rows in the table
+            self.granule_table.clearSelection()
+            for fid in selected_fids:
+                if fid in index_to_row:
+                    row = index_to_row[fid]
+                    for col in range(self.granule_table.columnCount()):
+                        item = self.granule_table.item(row, col)
+                        if item is not None:
+                            item.setSelected(True)
+        finally:
+            self._sync_in_progress = False
+
     def _select_all_granules(self):
-        """Select all granules in the list."""
-        self.granule_list.selectAll()
+        """Select all granules in the table."""
+        self.granule_table.selectAll()
 
     def _deselect_all_granules(self):
-        """Deselect all granules in the list."""
-        self.granule_list.clearSelection()
+        """Deselect all granules in the table."""
+        self.granule_table.clearSelection()
 
     def _display_single(self):
         """Display selected granule layer."""
@@ -818,13 +1217,16 @@ class OperaDockWidget(QDockWidget):
             QMessageBox.warning(self, "Error", "No valid layer selected")
             return
 
-        # Get the selected granule from the list
-        selected_items = self.granule_list.selectedItems()
-        if not selected_items:
+        # Get the selected granule from the table
+        selected_rows = set()
+        for item in self.granule_table.selectedItems():
+            selected_rows.add(item.row())
+        if not selected_rows:
             QMessageBox.warning(self, "Error", "No granule selected")
             return
 
-        granule_index = selected_items[0].data(Qt.UserRole)
+        first_row = min(selected_rows)
+        granule_index = self.granule_table.item(first_row, 0).data(Qt.UserRole)
         if granule_index is None or granule_index >= len(self._results):
             QMessageBox.warning(self, "Error", "No valid granule selected")
             return
@@ -839,7 +1241,7 @@ class OperaDockWidget(QDockWidget):
             # Show waiting state
             self._set_busy_state(True)
             self.status_label.setText(f"Loading COG: {layer_name}...")
-            self.status_label.setStyleSheet("color: blue; font-size: 10px;")
+            self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
             self.output_text.append(f"\nTrying to stream COG: {layer_name}")
             self.progress_bar.setVisible(True)
             self.progress_bar.setRange(0, 0)  # Indeterminate
@@ -860,7 +1262,7 @@ class OperaDockWidget(QDockWidget):
         # For non-COG files or if COG access failed, download the file
         self._set_busy_state(True)
         self.status_label.setText(f"Downloading {layer_name}...")
-        self.status_label.setStyleSheet("color: blue; font-size: 10px;")
+        self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
         self.output_text.append(f"Downloading layer: {layer_name}")
 
         # Disable buttons during download
@@ -894,15 +1296,20 @@ class OperaDockWidget(QDockWidget):
         if busy:
             QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
             self.display_single_btn.setEnabled(False)
-            self.display_footprints_btn.setEnabled(False)
             self.display_mosaic_btn.setEnabled(False)
+            self.download_single_layer_btn.setEnabled(False)
+            self.download_all_layers_btn.setEnabled(False)
         else:
             QApplication.restoreOverrideCursor()
             # Re-enable buttons based on selection state
-            selected_items = self.granule_list.selectedItems()
-            self.display_single_btn.setEnabled(len(selected_items) == 1)
-            self.display_mosaic_btn.setEnabled(len(selected_items) >= 1)
-            self.display_footprints_btn.setEnabled(self._gdf is not None)
+            selected_rows = set()
+            for item in self.granule_table.selectedItems():
+                selected_rows.add(item.row())
+            num_selected = len(selected_rows)
+            self.display_single_btn.setEnabled(num_selected == 1)
+            self.display_mosaic_btn.setEnabled(num_selected >= 1)
+            self.download_single_layer_btn.setEnabled(num_selected >= 1)
+            self.download_all_layers_btn.setEnabled(num_selected >= 1)
 
     def _try_load_cog(self, url: str, layer_name: str) -> bool:
         """Try to load a Cloud-Optimized GeoTIFF directly via streaming.
@@ -956,8 +1363,8 @@ class OperaDockWidget(QDockWidget):
                 self.iface.mapCanvas().refresh()
 
                 self.status_label.setText(f"Loaded (streaming): {layer_name}")
-                self.status_label.setStyleSheet("color: green; font-size: 10px;")
-                self.output_text.append(f"Successfully loaded COG via cloud streaming!")
+                self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
+                self.output_text.append("Successfully loaded COG via cloud streaming!")
                 return True
             else:
                 self.output_text.append("Layer not valid via cloud access")
@@ -1003,7 +1410,7 @@ class OperaDockWidget(QDockWidget):
                 self.iface.mapCanvas().refresh()
 
                 self.status_label.setText(f"Loaded: {layer_name}")
-                self.status_label.setStyleSheet("color: green; font-size: 10px;")
+                self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
                 self.output_text.append(f"Successfully loaded layer: {layer_name}")
                 self.output_text.append(f"File: {file_path}")
             else:
@@ -1011,7 +1418,7 @@ class OperaDockWidget(QDockWidget):
 
         except Exception as e:
             self.status_label.setText("Failed to load layer")
-            self.status_label.setStyleSheet("color: red; font-size: 10px;")
+            self.status_label.setStyleSheet("color: #EF5350; font-size: 10px;")
             self.output_text.append(f"Error loading layer: {str(e)}")
             QMessageBox.critical(self, "Error", f"Failed to load layer:\n{str(e)}")
 
@@ -1021,7 +1428,7 @@ class OperaDockWidget(QDockWidget):
         self._set_busy_state(False)
 
         self.status_label.setText("Download failed")
-        self.status_label.setStyleSheet("color: red; font-size: 10px;")
+        self.status_label.setStyleSheet("color: #EF5350; font-size: 10px;")
         self.output_text.append(f"Error: {error_msg}")
 
         QMessageBox.critical(
@@ -1032,14 +1439,13 @@ class OperaDockWidget(QDockWidget):
         """Display a virtual mosaic from selected granules.
 
         Creates separate mosaics for each projection/UTM zone to ensure proper alignment.
+        Uses a determinate progress bar that updates after each file is verified.
         """
-        selected_items = self.granule_list.selectedItems()
-        if not selected_items:
+        selected_rows = set()
+        for item in self.granule_table.selectedItems():
+            selected_rows.add(item.row())
+        if not selected_rows:
             QMessageBox.warning(self, "Error", "No granules selected")
-            return
-
-        if len(selected_items) < 1:
-            QMessageBox.warning(self, "Error", "Select at least one granule for mosaic")
             return
 
         # Get the selected layer type - extract just the layer suffix (e.g., B01_WTR.tif)
@@ -1049,36 +1455,29 @@ class OperaDockWidget(QDockWidget):
             return
 
         # Extract the layer band identifier from the filename
-        # OPERA L3 filenames: OPERA_L3_DSWx-HLS_T12STF_..._v1.1_B01_WTR.tif
-        # OPERA RTC-S1 filenames: OPERA_L2_RTC-S1_T069-..._v1.0_VV.tif
-        # We want to extract "B01_WTR" or "VV" to match across different granules
         import re
 
-        # Pattern 1: L3 band identifier (e.g., "B01_WTR", "B02_BWTR")
         match = re.search(r"_(B\d+_[A-Za-z0-9]+)\.tif$", layer_filename, re.IGNORECASE)
         if match:
-            layer_band = match.group(1)  # e.g., "B01_WTR"
+            layer_band = match.group(1)
         else:
-            # Pattern 2: RTC-S1 polarization (e.g., "VV", "VH", "HH", "HV")
             match = re.search(r"_([VH]{2})\.tif$", layer_filename, re.IGNORECASE)
             if match:
-                layer_band = match.group(1)  # e.g., "VV"
+                layer_band = match.group(1)
             else:
-                # Fallback: last underscore-separated part before .tif
                 parts = layer_filename.replace(".tif", "").split("_")
                 layer_band = parts[-1] if parts else layer_filename
 
-        # Show busy state
+        num_selected = len(selected_rows)
+
+        # Show busy state with determinate progress bar
         self._set_busy_state(True)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)
-        self.status_label.setText(
-            f"Creating mosaic from {len(selected_items)} granules..."
-        )
-        self.status_label.setStyleSheet("color: blue; font-size: 10px;")
-        self.output_text.append(
-            f"\nCreating mosaic from {len(selected_items)} granules..."
-        )
+        self.progress_bar.setRange(0, num_selected)
+        self.progress_bar.setValue(0)
+        self.status_label.setText(f"Creating mosaic from {num_selected} granules...")
+        self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
+        self.output_text.append(f"\nCreating mosaic from {num_selected} granules...")
         self.output_text.append(f"Layer band: {layer_band}")
         QApplication.processEvents()
 
@@ -1097,19 +1496,19 @@ class OperaDockWidget(QDockWidget):
             gdal.UseExceptions()
 
             # Collect URLs for all selected granules, grouped by CRS
-            # Dictionary: CRS WKT -> list of (vsi_path, crs_name)
             files_by_crs = {}
             not_found = []
             access_failed = []
 
-            total_granules = len(selected_items)
-            for idx, item in enumerate(selected_items):
-                granule_index = item.data(Qt.UserRole)
+            total_granules = num_selected
+            for idx, row in enumerate(sorted(selected_rows)):
+                granule_index = self.granule_table.item(row, 0).data(Qt.UserRole)
                 if granule_index is None or granule_index >= len(self._results):
+                    self.progress_bar.setValue(idx + 1)
                     continue
 
                 granule = self._results[granule_index]
-                granule_id = item.text()
+                granule_id = self.granule_table.item(row, 0).text()
                 data_links = (
                     granule.data_links() if hasattr(granule, "data_links") else []
                 )
@@ -1122,8 +1521,6 @@ class OperaDockWidget(QDockWidget):
                 # Find the matching layer file by band identifier
                 found = False
                 for link in data_links:
-                    # Check if this link contains our band identifier followed by .tif
-                    # Use case-insensitive matching
                     if (
                         f"_{layer_band}.tif".lower() in link.lower()
                         or link.lower().endswith(f"_{layer_band}.tif".lower())
@@ -1139,27 +1536,25 @@ class OperaDockWidget(QDockWidget):
                                 srs = osr.SpatialReference()
                                 srs.ImportFromWkt(proj)
 
-                                # Get a readable CRS name (e.g., "UTM zone 12N")
                                 crs_name = (
                                     srs.GetName() if srs.GetName() else "Unknown CRS"
                                 )
-                                # Extract just the zone info for cleaner naming
                                 zone_match = re.search(
-                                    r"(UTM zone \d+[NS]?)", crs_name, re.IGNORECASE
+                                    r"(UTM zone \d+[NS]?)",
+                                    crs_name,
+                                    re.IGNORECASE,
                                 )
                                 if zone_match:
                                     crs_short = zone_match.group(1)
                                 else:
                                     crs_short = crs_name[:30]
 
-                                # Use EPSG code as key if available, otherwise use WKT
                                 epsg = srs.GetAuthorityCode(None)
                                 if epsg:
                                     crs_key = f"EPSG:{epsg}"
                                 else:
-                                    crs_key = proj[:100]  # Use truncated WKT as key
+                                    crs_key = proj[:100]
 
-                                # Group by CRS
                                 if crs_key not in files_by_crs:
                                     files_by_crs[crs_key] = {
                                         "name": crs_short,
@@ -1168,7 +1563,6 @@ class OperaDockWidget(QDockWidget):
                                     }
                                 files_by_crs[crs_key]["paths"].append(vsi_path)
 
-                                # Read nodata from the first file in each CRS group
                                 if files_by_crs[crs_key]["nodata"] is None:
                                     band = ds.GetRasterBand(1)
                                     files_by_crs[crs_key][
@@ -1200,6 +1594,7 @@ class OperaDockWidget(QDockWidget):
                         f"  [{idx + 1}] NOT FOUND: No {layer_band} in granule"
                     )
 
+                self.progress_bar.setValue(idx + 1)
                 QApplication.processEvents()
 
             if not_found:
@@ -1340,14 +1735,15 @@ class OperaDockWidget(QDockWidget):
                 self.iface.mapCanvas().refresh()
 
             self.status_label.setText(f"Created {len(layers_created)} mosaic layer(s)")
-            self.status_label.setStyleSheet("color: green; font-size: 10px;")
+            self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
             self.output_text.append(
-                f"\nSuccessfully created {len(layers_created)} mosaic layer(s) with {total_files} scenes total!"
+                f"\nSuccessfully created {len(layers_created)} mosaic layer(s) "
+                f"with {total_files} scenes total!"
             )
 
         except Exception as e:
             self.status_label.setText("Mosaic failed")
-            self.status_label.setStyleSheet("color: red; font-size: 10px;")
+            self.status_label.setStyleSheet("color: #EF5350; font-size: 10px;")
             self.output_text.append(f"\nError creating mosaic: {str(e)}")
             QMessageBox.critical(
                 self, "Mosaic Error", f"Failed to create mosaic:\n{str(e)}"
@@ -1357,6 +1753,19 @@ class OperaDockWidget(QDockWidget):
             self._set_busy_state(False)
             self.progress_bar.setVisible(False)
 
+    def _remove_footprint_layer(self):
+        """Remove the footprint layer from the map if it exists."""
+        if self._footprint_layer is not None:
+            try:
+                layer_ids = [
+                    lyr.id() for lyr in QgsProject.instance().mapLayers().values()
+                ]
+                if self._footprint_layer.id() in layer_ids:
+                    QgsProject.instance().removeMapLayer(self._footprint_layer.id())
+            except Exception:
+                pass  # Layer may already be removed
+            self._footprint_layer = None
+
     def _display_footprints(self):
         """Display search result footprints as a vector layer."""
         if self._gdf is None:
@@ -1365,10 +1774,7 @@ class OperaDockWidget(QDockWidget):
 
         try:
             # Remove existing footprint layer
-            if self._footprint_layer and self._footprint_layer.id() in [
-                l.id() for l in QgsProject.instance().mapLayers().values()
-            ]:
-                QgsProject.instance().removeMapLayer(self._footprint_layer.id())
+            self._remove_footprint_layer()
 
             # Create a temporary GeoJSON file
             temp_dir = tempfile.gettempdir()
@@ -1397,6 +1803,11 @@ class OperaDockWidget(QDockWidget):
                 QgsProject.instance().addMapLayer(layer)
                 self._footprint_layer = layer
 
+                # Connect selection sync from map to table
+                self._footprint_layer.selectionChanged.connect(
+                    self._on_footprint_selection_changed
+                )
+
                 # Zoom to layer extent with proper CRS transformation
                 layer_extent = layer.extent()
                 layer_crs = layer.crs()
@@ -1414,18 +1825,180 @@ class OperaDockWidget(QDockWidget):
                 self.iface.mapCanvas().refresh()
 
                 self.status_label.setText(f"Displayed {len(self._gdf)} footprints")
-                self.status_label.setStyleSheet("color: green; font-size: 10px;")
+                self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
                 self.output_text.append(f"Displayed {len(self._gdf)} footprints on map")
             else:
                 raise Exception("Failed to create footprint layer")
 
         except Exception as e:
             self.status_label.setText("Failed to display footprints")
-            self.status_label.setStyleSheet("color: red; font-size: 10px;")
+            self.status_label.setStyleSheet("color: #EF5350; font-size: 10px;")
             self.output_text.append(f"Error: {str(e)}")
             QMessageBox.critical(
                 self, "Error", f"Failed to display footprints:\n{str(e)}"
             )
+
+    def _get_selected_granules(self):
+        """Get granule objects for all selected table rows.
+
+        Returns:
+            List of granule objects, or empty list if none selected.
+        """
+        selected_rows = set()
+        for item in self.granule_table.selectedItems():
+            selected_rows.add(item.row())
+
+        granules = []
+        for row in sorted(selected_rows):
+            index = self.granule_table.item(row, 0).data(Qt.UserRole)
+            if index is not None and index < len(self._results):
+                granules.append(self._results[index])
+        return granules
+
+    def _get_layer_band(self):
+        """Extract the layer band identifier from the selected layer filename.
+
+        Returns:
+            The band identifier string (e.g. "B01_WTR", "VV"), or None.
+        """
+        import re
+
+        layer_filename = self.layer_combo.currentText()
+        if not layer_filename or layer_filename == "No raster files available":
+            return None
+
+        match = re.search(r"_(B\d+_[A-Za-z0-9]+)\.tif$", layer_filename, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        match = re.search(r"_([VH]{2})\.tif$", layer_filename, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        parts = layer_filename.replace(".tif", "").split("_")
+        return parts[-1] if parts else layer_filename
+
+    def _start_download(self, granules, download_dir, layer_filter=None):
+        """Start the download worker for the given granules.
+
+        Args:
+            granules: List of granule objects to download.
+            download_dir: Directory path to save downloaded files.
+            layer_filter: Optional layer band suffix to filter downloads.
+        """
+        mode = f" ({layer_filter} only)" if layer_filter else " (all layers)"
+        self._set_busy_state(True)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, len(granules))
+        self.progress_bar.setValue(0)
+        self.status_label.setText(f"Downloading {len(granules)} granules{mode}...")
+        self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
+        self.output_text.append(
+            f"\nStarting download of {len(granules)} granules{mode} to:"
+        )
+        self.output_text.append(f"  {download_dir}")
+
+        self._download_granules_worker = DownloadGranulesWorker(
+            granules=granules,
+            download_dir=download_dir,
+            layer_filter=layer_filter,
+        )
+        self._download_granules_worker.progress.connect(self._on_bulk_download_progress)
+        self._download_granules_worker.file_downloaded.connect(self._on_file_downloaded)
+        self._download_granules_worker.finished.connect(self._on_bulk_download_finished)
+        self._download_granules_worker.error.connect(self._on_bulk_download_error)
+        self._download_granules_worker.start()
+
+    def _download_single_layer(self):
+        """Download only the selected layer type for each selected granule."""
+        granules = self._get_selected_granules()
+        if not granules:
+            QMessageBox.warning(self, "Error", "No granules selected")
+            return
+
+        layer_band = self._get_layer_band()
+        if not layer_band:
+            QMessageBox.warning(self, "Error", "No layer type selected")
+            return
+
+        default_dir = self.settings.value("NasaOpera/cache_dir", "")
+        if not default_dir:
+            default_dir = os.path.join(os.path.expanduser("~"), "opera_downloads")
+
+        download_dir = QFileDialog.getExistingDirectory(
+            self, "Select Download Directory", default_dir
+        )
+        if not download_dir:
+            return
+
+        self._start_download(granules, download_dir, layer_filter=layer_band)
+
+    def _download_all_layers(self):
+        """Download all layer files for each selected granule."""
+        granules = self._get_selected_granules()
+        if not granules:
+            QMessageBox.warning(self, "Error", "No granules selected")
+            return
+
+        default_dir = self.settings.value("NasaOpera/cache_dir", "")
+        if not default_dir:
+            default_dir = os.path.join(os.path.expanduser("~"), "opera_downloads")
+
+        download_dir = QFileDialog.getExistingDirectory(
+            self, "Select Download Directory", default_dir
+        )
+        if not download_dir:
+            return
+
+        self._start_download(granules, download_dir)
+
+    def _on_bulk_download_progress(self, message):
+        """Handle bulk download progress update.
+
+        Args:
+            message: Progress message string.
+        """
+        self.status_label.setText(message)
+        self.output_text.append(message)
+
+    def _on_file_downloaded(self, file_path, current, total):
+        """Handle individual file download completion.
+
+        Args:
+            file_path: Path to the downloaded file.
+            current: Current file number (1-based).
+            total: Total number of files.
+        """
+        self.progress_bar.setValue(current)
+        self.output_text.append(f"  Downloaded: {os.path.basename(file_path)}")
+
+    def _on_bulk_download_finished(self, downloaded_files):
+        """Handle bulk download completion.
+
+        Args:
+            downloaded_files: List of paths to downloaded files.
+        """
+        self.progress_bar.setVisible(False)
+        self._set_busy_state(False)
+
+        count = len(downloaded_files)
+        self.status_label.setText(f"Downloaded {count} files")
+        self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
+        self.output_text.append(f"\nDownload complete: {count} files downloaded.")
+
+    def _on_bulk_download_error(self, error_msg):
+        """Handle bulk download error.
+
+        Args:
+            error_msg: Error message string.
+        """
+        self.progress_bar.setVisible(False)
+        self._set_busy_state(False)
+
+        self.status_label.setText("Download failed")
+        self.status_label.setStyleSheet("color: #EF5350; font-size: 10px;")
+        self.output_text.append(f"\nDownload error: {error_msg}")
+        QMessageBox.critical(
+            self, "Download Error", f"Failed to download:\n{error_msg}"
+        )
 
     def _reset(self):
         """Reset the search interface."""
@@ -1435,24 +2008,32 @@ class OperaDockWidget(QDockWidget):
         self.max_items_spin.setValue(50)
         self.dataset_combo.setCurrentIndex(0)
 
-        self.granule_list.clear()
-        self.granule_list.setEnabled(False)
+        self.granule_table.setRowCount(0)
+        self.granule_table.setEnabled(False)
         self.select_all_btn.setEnabled(False)
         self.deselect_all_btn.setEnabled(False)
         self.layer_combo.clear()
         self.layer_combo.setEnabled(False)
 
         self.display_single_btn.setEnabled(False)
-        self.display_footprints_btn.setEnabled(False)
         self.display_mosaic_btn.setEnabled(False)
+        self.download_single_layer_btn.setEnabled(False)
+        self.download_all_layers_btn.setEnabled(False)
 
         self.output_text.clear()
         self.status_label.setText("Ready to search")
-        self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+        self.status_label.setStyleSheet("color: #B0BEC5; font-size: 10px;")
+
+        # Remove footprint layer from map
+        self._remove_footprint_layer()
 
         self._results = []
         self._gdf = None
 
     def closeEvent(self, event):
         """Handle dock widget close event."""
+        # Deactivate rectangle tool if active
+        if self._rectangle_tool is not None:
+            self.iface.mapCanvas().unsetMapTool(self._rectangle_tool)
+            self._rectangle_tool = None
         event.accept()
