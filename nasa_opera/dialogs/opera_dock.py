@@ -1757,14 +1757,17 @@ class OperaDockWidget(QDockWidget):
         """Remove the footprint layer from the map if it exists."""
         if self._footprint_layer is not None:
             try:
-                layer_ids = [
-                    lyr.id() for lyr in QgsProject.instance().mapLayers().values()
-                ]
-                if self._footprint_layer.id() in layer_ids:
-                    QgsProject.instance().removeMapLayer(self._footprint_layer.id())
-            except Exception:
-                pass  # Layer may already be removed
+                layer_id = self._footprint_layer.id()
+                if layer_id in QgsProject.instance().mapLayers():
+                    QgsProject.instance().removeMapLayer(layer_id)
+            except RuntimeError:
+                pass  # Underlying C++ object already deleted
             self._footprint_layer = None
+
+        # Also remove any orphaned footprint layers by name
+        for lyr in list(QgsProject.instance().mapLayers().values()):
+            if lyr.name().startswith("OPERA Footprints"):
+                QgsProject.instance().removeMapLayer(lyr.id())
 
     def _display_footprints(self):
         """Display search result footprints as a vector layer."""
