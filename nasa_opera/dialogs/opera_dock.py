@@ -401,6 +401,11 @@ class DownloadGranulesWorker(QThread):
                     )
                     return
 
+                if self._cancelled:
+                    self.progress.emit("Download cancelled by user.")
+                    self.finished.emit(all_downloaded)
+                    return
+
                 self.progress.emit(f"Downloading {len(urls)} files...")
                 downloaded = earthaccess.download(
                     urls, local_path=self.download_dir, threads=1
@@ -580,6 +585,7 @@ class RectangleMapTool(QgsMapToolEmitPoint):
             return
         self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
         rect = QgsRectangle(self.start_point, self.end_point)
+        rect.normalize()
         self.rubber_band.addPoint(QgsPointXY(rect.xMinimum(), rect.yMinimum()), False)
         self.rubber_band.addPoint(QgsPointXY(rect.xMinimum(), rect.yMaximum()), False)
         self.rubber_band.addPoint(QgsPointXY(rect.xMaximum(), rect.yMaximum()), False)
@@ -1046,10 +1052,19 @@ class OperaDockWidget(QDockWidget):
             begin_date = ""
             end_date = ""
             num_links = 0
-            if gdf is not None and i < len(gdf):
-                begin_date = str(gdf.iloc[i].get("begin_date", ""))[:10]
-                end_date = str(gdf.iloc[i].get("end_date", ""))[:10]
-                num_links = int(gdf.iloc[i].get("num_links", 0))
+            if gdf is not None:
+                row_gdf = None
+                try:
+                    row_gdf = gdf.iloc[i]
+                except IndexError:
+                    pass
+                if row_gdf is not None:
+                    begin_date = str(row_gdf.get("begin_date", ""))[:10]
+                    end_date = str(row_gdf.get("end_date", ""))[:10]
+                    try:
+                        num_links = int(row_gdf.get("num_links", 0))
+                    except (TypeError, ValueError):
+                        num_links = 0
 
             self.granule_table.setItem(row, 1, QTableWidgetItem(begin_date))
             self.granule_table.setItem(row, 2, QTableWidgetItem(end_date))
@@ -1108,7 +1123,10 @@ class OperaDockWidget(QDockWidget):
 
         # Get the first selected granule to populate layer dropdown
         first_row = min(selected_rows)
-        index = self.granule_table.item(first_row, 0).data(Qt.UserRole)
+        item = self.granule_table.item(first_row, 0)
+        if item is None:
+            return
+        index = item.data(Qt.UserRole)
 
         if index is None or index >= len(self._results):
             return
@@ -1158,7 +1176,10 @@ class OperaDockWidget(QDockWidget):
                     if granule_index is not None:
                         feature_ids.append(granule_index)
 
-            self._footprint_layer.selectByIds(feature_ids)
+            try:
+                self._footprint_layer.selectByIds(feature_ids)
+            except Exception:
+                self._footprint_layer = None
         finally:
             self._sync_in_progress = False
 
@@ -1892,8 +1913,12 @@ class OperaDockWidget(QDockWidget):
         mode = f" ({layer_filter} only)" if layer_filter else " (all layers)"
         self._set_busy_state(True)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(granules))
-        self.progress_bar.setValue(0)
+        if layer_filter:
+            # Single-layer mode: actual file count may differ from granule count
+            self.progress_bar.setRange(0, 0)
+        else:
+            self.progress_bar.setRange(0, len(granules))
+            self.progress_bar.setValue(0)
         self.status_label.setText(f"Downloading {len(granules)} granules{mode}...")
         self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
         self.output_text.append(
@@ -2041,4 +2066,20 @@ class OperaDockWidget(QDockWidget):
         if self._rectangle_tool is not None:
             self.iface.mapCanvas().unsetMapTool(self._rectangle_tool)
             self._rectangle_tool = None
+
+        # Clean up any running worker threads
+        for attr_name in ("_download_granules_worker", "_search_worker"):
+            worker = getattr(self, attr_name, None)
+            if worker is not None:
+                if hasattr(worker, "cancel"):
+                    try:
+                        worker.cancel()
+                    except Exception:
+                        pass
+                if hasattr(worker, "wait"):
+                    try:
+                        worker.wait()
+                    except Exception:
+                        pass
+
         event.accept()
