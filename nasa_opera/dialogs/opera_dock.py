@@ -1769,6 +1769,8 @@ class OperaDockWidget(QDockWidget):
             if lyr.name().startswith("OPERA Footprints"):
                 QgsProject.instance().removeMapLayer(lyr.id())
 
+        self.iface.mapCanvas().refresh()
+
     def _display_footprints(self):
         """Display search result footprints as a vector layer."""
         if self._gdf is None:
