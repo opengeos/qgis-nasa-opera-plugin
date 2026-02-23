@@ -10,6 +10,7 @@ This module provides the main NASA OPERA search interface that allows users to:
 
 import os
 import json
+import math
 import tempfile
 from datetime import datetime, date
 from typing import Optional, List, Tuple
@@ -1048,21 +1049,23 @@ class OperaDockWidget(QDockWidget):
             return
 
         # Extract the layer band identifier from the filename
-        # OPERA filenames follow pattern: OPERA_L3_DSWx-HLS_T12STF_..._v1.1_B01_WTR.tif
-        # We want to extract "B01_WTR" to match across different granules
+        # OPERA L3 filenames: OPERA_L3_DSWx-HLS_T12STF_..._v1.1_B01_WTR.tif
+        # OPERA RTC-S1 filenames: OPERA_L2_RTC-S1_T069-..._v1.0_VV.tif
+        # We want to extract "B01_WTR" or "VV" to match across different granules
         import re
 
-        # Try to extract the band identifier (e.g., "B01_WTR", "B02_BWTR", etc.)
-        # Pattern: _B followed by digits, then underscore, then letters, then .tif
+        # Pattern 1: L3 band identifier (e.g., "B01_WTR", "B02_BWTR")
         match = re.search(r"_(B\d+_[A-Za-z0-9]+)\.tif$", layer_filename, re.IGNORECASE)
         if match:
             layer_band = match.group(1)  # e.g., "B01_WTR"
         else:
-            # Fallback: try to get the last two underscore-separated parts before .tif
-            parts = layer_filename.replace(".tif", "").split("_")
-            if len(parts) >= 2:
-                layer_band = "_".join(parts[-2:])  # e.g., "B01_WTR"
+            # Pattern 2: RTC-S1 polarization (e.g., "VV", "VH", "HH", "HV")
+            match = re.search(r"_([VH]{2})\.tif$", layer_filename, re.IGNORECASE)
+            if match:
+                layer_band = match.group(1)  # e.g., "VV"
             else:
+                # Fallback: last underscore-separated part before .tif
+                parts = layer_filename.replace(".tif", "").split("_")
                 layer_band = parts[-1] if parts else layer_filename
 
         # Show busy state
@@ -1123,7 +1126,7 @@ class OperaDockWidget(QDockWidget):
                     # Use case-insensitive matching
                     if (
                         f"_{layer_band}.tif".lower() in link.lower()
-                        or link.lower().endswith(f"{layer_band}.tif".lower())
+                        or link.lower().endswith(f"_{layer_band}.tif".lower())
                     ):
                         vsi_path = get_vsicurl_path(link)
 
@@ -1161,8 +1164,16 @@ class OperaDockWidget(QDockWidget):
                                     files_by_crs[crs_key] = {
                                         "name": crs_short,
                                         "paths": [],
+                                        "nodata": None,
                                     }
                                 files_by_crs[crs_key]["paths"].append(vsi_path)
+
+                                # Read nodata from the first file in each CRS group
+                                if files_by_crs[crs_key]["nodata"] is None:
+                                    band = ds.GetRasterBand(1)
+                                    files_by_crs[crs_key][
+                                        "nodata"
+                                    ] = band.GetNoDataValue()
 
                                 self.output_text.append(
                                     f"  [{idx + 1}] OK: {os.path.basename(link)} ({crs_short})"
@@ -1235,12 +1246,35 @@ class OperaDockWidget(QDockWidget):
                 )
                 vrt_path = os.path.join(temp_dir, vrt_filename)
 
-                vrt_options = gdal.BuildVRTOptions(
-                    resampleAlg="nearest",
-                    addAlpha=False,
-                    srcNodata=255,
-                    VRTNodata=255,
-                )
+                # Use nodata value detected from source files
+                group_nodata = crs_data.get("nodata")
+                if (
+                    group_nodata is not None
+                    and isinstance(group_nodata, float)
+                    and math.isnan(group_nodata)
+                ):
+                    nodata_display = "NaN"
+                    vrt_options = gdal.BuildVRTOptions(
+                        resampleAlg="nearest",
+                        addAlpha=False,
+                        srcNodata="nan",
+                        VRTNodata="nan",
+                    )
+                elif group_nodata is not None:
+                    nodata_display = str(group_nodata)
+                    vrt_options = gdal.BuildVRTOptions(
+                        resampleAlg="nearest",
+                        addAlpha=False,
+                        srcNodata=group_nodata,
+                        VRTNodata=group_nodata,
+                    )
+                else:
+                    nodata_display = "auto (from source metadata)"
+                    vrt_options = gdal.BuildVRTOptions(
+                        resampleAlg="nearest",
+                        addAlpha=False,
+                    )
+                self.output_text.append(f"  Nodata value: {nodata_display}")
 
                 vrt_ds = gdal.BuildVRT(vrt_path, vsi_paths, options=vrt_options)
                 if vrt_ds is None:
