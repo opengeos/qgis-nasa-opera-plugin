@@ -310,33 +310,32 @@ class SettingsDockWidget(QDockWidget):
 
         try:
             import earthaccess
+            import os
 
-            # Try to authenticate
+            # Ensure environment strategy has values before first login attempt.
+            os.environ["EARTHDATA_USERNAME"] = username
+            os.environ["EARTHDATA_PASSWORD"] = password
+
+            # Persist credentials so fresh installs work without extra manual setup.
+            self._save_to_netrc(username, password)
+
+            # Try environment first, then netrc as a fallback.
             auth = earthaccess.login(strategy="environment")
+            if not auth:
+                auth = earthaccess.login(strategy="netrc")
+
             if auth:
                 QMessageBox.information(
-                    self, "Success", "Successfully authenticated with NASA Earthdata!"
+                    self,
+                    "Success",
+                    "Successfully authenticated with NASA Earthdata! Credentials were saved to ~/.netrc.",
                 )
             else:
-                # Try with provided credentials
-                import os
-
-                os.environ["EARTHDATA_USERNAME"] = username
-                os.environ["EARTHDATA_PASSWORD"] = password
-
-                auth = earthaccess.login(strategy="environment")
-                if auth:
-                    QMessageBox.information(
-                        self,
-                        "Success",
-                        "Successfully authenticated with NASA Earthdata!",
-                    )
-                else:
-                    QMessageBox.warning(
-                        self,
-                        "Authentication Failed",
-                        "Could not authenticate. Please check your credentials.",
-                    )
+                QMessageBox.warning(
+                    self,
+                    "Authentication Failed",
+                    "Could not authenticate. Please check your credentials.",
+                )
         except ImportError:
             QMessageBox.critical(
                 self,
