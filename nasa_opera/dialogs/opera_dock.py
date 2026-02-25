@@ -240,7 +240,10 @@ class SearchWorker(QThread):
                     records.append(record)
 
                 df = pd.DataFrame(records)
-                gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+                # Don't set crs= here to avoid pyproj/PROJ database issues
+                # in the isolated venv. GeoJSON is WGS84 by spec, and QGIS
+                # assigns CRS when loading the layer.
+                gdf = gpd.GeoDataFrame(df, geometry="geometry")
 
                 self.finished.emit(results, gdf)
 
@@ -1806,12 +1809,18 @@ class OperaDockWidget(QDockWidget):
             temp_dir = tempfile.gettempdir()
             geojson_path = os.path.join(temp_dir, "opera_footprints.geojson")
 
-            # Save GeoDataFrame to GeoJSON
-            self._gdf.to_file(geojson_path, driver="GeoJSON")
+            # Save GeoDataFrame to GeoJSON using to_json() to avoid fiona dependency
+            geojson_str = self._gdf.to_json()
+            with open(geojson_path, "w", encoding="utf-8") as f:
+                f.write(geojson_str)
 
             # Create and add vector layer
             layer_name = f"OPERA Footprints ({len(self._gdf)})"
             layer = QgsVectorLayer(geojson_path, layer_name, "ogr")
+
+            # Ensure WGS84 CRS (GeoJSON spec mandates it)
+            if layer.isValid() and not layer.crs().isValid():
+                layer.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
 
             if layer.isValid():
                 # Style the layer
@@ -1819,9 +1828,9 @@ class OperaDockWidget(QDockWidget):
 
                 symbol = QgsFillSymbol.createSimple(
                     {
-                        "color": "65,105,225,50",  # Royal blue with transparency
+                        "color": "65,105,225,80",  # Royal blue with transparency
                         "outline_color": "65,105,225,255",
-                        "outline_width": "0.5",
+                        "outline_width": "0.8",
                     }
                 )
                 layer.renderer().setSymbol(symbol)
