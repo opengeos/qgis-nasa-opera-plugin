@@ -179,6 +179,33 @@ class NasaOpera:
     def toggle_opera_dock(self):
         """Toggle the NASA OPERA dock widget visibility."""
         if self._opera_dock is None:
+            # Check dependencies before creating the search panel
+            try:
+                from .deps_manager import all_dependencies_met
+
+                if not all_dependencies_met():
+                    reply = QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Missing Dependencies",
+                        "The NASA OPERA plugin requires additional Python "
+                        "packages (earthaccess, geopandas, shapely, pandas) "
+                        "that are not installed.\n\n"
+                        "Would you like to open the Settings panel to "
+                        "install them?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes,
+                    )
+                    if reply == QMessageBox.Yes:
+                        self.opera_action.setChecked(False)
+                        self.toggle_settings_dock()
+                        if self._settings_dock is not None:
+                            self._settings_dock.show_dependencies_tab()
+                        return
+                    self.opera_action.setChecked(False)
+                    return
+            except Exception:
+                pass  # Fall through to existing behavior
+
             try:
                 from .dialogs.opera_dock import OperaDockWidget
 

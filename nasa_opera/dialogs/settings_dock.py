@@ -22,6 +22,7 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QFileDialog,
     QTabWidget,
+    QProgressBar,
 )
 from qgis.PyQt.QtGui import QFont
 
@@ -69,20 +70,24 @@ class SettingsDockWidget(QDockWidget):
         layout.addWidget(header_label)
 
         # Tab widget for organized settings
-        tab_widget = QTabWidget()
-        layout.addWidget(tab_widget)
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
+
+        # Dependencies tab (first, most important for new users)
+        dependencies_tab = self._create_dependencies_tab()
+        self.tab_widget.addTab(dependencies_tab, "Dependencies")
 
         # Credentials tab
         credentials_tab = self._create_credentials_tab()
-        tab_widget.addTab(credentials_tab, "Credentials")
+        self.tab_widget.addTab(credentials_tab, "Credentials")
 
         # Display settings tab
         display_tab = self._create_display_tab()
-        tab_widget.addTab(display_tab, "Display")
+        self.tab_widget.addTab(display_tab, "Display")
 
         # Advanced settings tab
         advanced_tab = self._create_advanced_tab()
-        tab_widget.addTab(advanced_tab, "Advanced")
+        self.tab_widget.addTab(advanced_tab, "Advanced")
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -117,6 +122,221 @@ class SettingsDockWidget(QDockWidget):
         self.status_label.setStyleSheet("color: gray; font-size: 10px;")
         layout.addWidget(self.status_label)
 
+    def _create_dependencies_tab(self):
+        """Create the dependencies management tab."""
+        from ..deps_manager import REQUIRED_PACKAGES
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Info label
+        info_label = QLabel(
+            "The NASA OPERA plugin requires the following Python packages.\n"
+            "Click 'Install Dependencies' to install them in an isolated\n"
+            "virtual environment that does not affect your QGIS Python."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("font-size: 10px; padding: 5px;")
+        layout.addWidget(info_label)
+
+        # Dependencies status group
+        deps_group = QGroupBox("Package Status")
+        deps_layout = QVBoxLayout(deps_group)
+
+        self.dep_status_labels = {}
+        for import_name, pip_name in REQUIRED_PACKAGES:
+            row_layout = QHBoxLayout()
+            name_label = QLabel(f"  {pip_name}")
+            name_label.setMinimumWidth(100)
+            status_label = QLabel("Checking...")
+            status_label.setStyleSheet("color: gray;")
+            row_layout.addWidget(name_label)
+            row_layout.addWidget(status_label)
+            row_layout.addStretch()
+            deps_layout.addLayout(row_layout)
+            self.dep_status_labels[import_name] = status_label
+
+        layout.addWidget(deps_group)
+
+        # Overall status
+        self.deps_overall_label = QLabel("Checking dependencies...")
+        self.deps_overall_label.setWordWrap(True)
+        self.deps_overall_label.setStyleSheet("font-weight: bold; padding: 5px;")
+        layout.addWidget(self.deps_overall_label)
+
+        # Progress bar (hidden by default)
+        self.deps_progress_bar = QProgressBar()
+        self.deps_progress_bar.setRange(0, 100)
+        self.deps_progress_bar.setVisible(False)
+        layout.addWidget(self.deps_progress_bar)
+
+        # Progress label (hidden by default)
+        self.deps_progress_label = QLabel("")
+        self.deps_progress_label.setWordWrap(True)
+        self.deps_progress_label.setStyleSheet("font-size: 10px;")
+        self.deps_progress_label.setVisible(False)
+        layout.addWidget(self.deps_progress_label)
+
+        # Install button
+        self.install_deps_btn = QPushButton("Install Dependencies")
+        self.install_deps_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1976D2;
+                color: white;
+                font-weight: bold;
+                padding: 6px 12px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #1565C0;
+            }
+            QPushButton:disabled {
+                background-color: #BDBDBD;
+            }
+        """)
+        self.install_deps_btn.clicked.connect(self._install_dependencies)
+        layout.addWidget(self.install_deps_btn)
+
+        # Refresh button
+        self.refresh_deps_btn = QPushButton("Refresh Status")
+        self.refresh_deps_btn.clicked.connect(self._refresh_dependency_status)
+        layout.addWidget(self.refresh_deps_btn)
+
+        layout.addStretch()
+
+        # Note about isolation
+        note_label = QLabel(
+            "Packages are installed in an isolated environment\n"
+            "(~/.qgis_nasa_opera/) and do not affect your QGIS Python.\n"
+            "If packages are not detected after installation, restart QGIS."
+        )
+        note_label.setWordWrap(True)
+        note_label.setStyleSheet("font-size: 9px; font-style: italic;")
+        layout.addWidget(note_label)
+
+        # Trigger initial status check after UI is constructed
+        from qgis.PyQt.QtCore import QTimer
+
+        QTimer.singleShot(100, self._refresh_dependency_status)
+
+        return widget
+
+    def _refresh_dependency_status(self):
+        """Check and display the status of all required dependencies."""
+        from ..deps_manager import check_dependencies
+
+        deps = check_dependencies()
+        all_ok = True
+
+        for dep in deps:
+            label = self.dep_status_labels.get(dep["name"])
+            if label is None:
+                continue
+            if dep["installed"]:
+                version_str = dep["version"] or "installed"
+                label.setText(f"Installed ({version_str})")
+                label.setStyleSheet("color: green; font-weight: bold;")
+            else:
+                label.setText("Not installed")
+                label.setStyleSheet("color: red;")
+                all_ok = False
+
+        if all_ok:
+            self.deps_overall_label.setText("All dependencies are installed.")
+            self.deps_overall_label.setStyleSheet(
+                "color: green; font-weight: bold; padding: 5px;"
+            )
+            self.install_deps_btn.setVisible(False)
+        else:
+            missing_count = sum(1 for d in deps if not d["installed"])
+            self.deps_overall_label.setText(
+                f"{missing_count} package(s) missing. "
+                "Click 'Install Dependencies' to install."
+            )
+            self.deps_overall_label.setStyleSheet(
+                "color: #E65100; font-weight: bold; padding: 5px;"
+            )
+            self.install_deps_btn.setVisible(True)
+            self.install_deps_btn.setEnabled(True)
+
+    def _install_dependencies(self):
+        """Start installing missing dependencies in a background thread."""
+        from ..deps_manager import DepsInstallWorker
+
+        self.install_deps_btn.setEnabled(False)
+        self.install_deps_btn.setText("Installing...")
+        self.refresh_deps_btn.setEnabled(False)
+
+        self.deps_progress_bar.setVisible(True)
+        self.deps_progress_bar.setValue(0)
+        self.deps_progress_label.setVisible(True)
+        self.deps_progress_label.setText("Starting installation...")
+
+        self._deps_worker = DepsInstallWorker()
+        self._deps_worker.progress.connect(self._on_deps_install_progress)
+        self._deps_worker.finished.connect(self._on_deps_install_finished)
+        self._deps_worker.start()
+
+    def _on_deps_install_progress(self, percent, message):
+        """Handle progress updates from the install worker.
+
+        Args:
+            percent: Installation progress percentage (0-100).
+            message: Status message to display.
+        """
+        self.deps_progress_bar.setValue(percent)
+        self.deps_progress_label.setText(message)
+
+    def _on_deps_install_finished(self, success, message):
+        """Handle completion of dependency installation.
+
+        Args:
+            success: Whether installation was successful.
+            message: Result message.
+        """
+        self.deps_progress_bar.setVisible(False)
+        self.deps_progress_label.setVisible(False)
+        self.install_deps_btn.setText("Install Dependencies")
+        self.refresh_deps_btn.setEnabled(True)
+
+        if success:
+            self.deps_overall_label.setText(message)
+            self.deps_overall_label.setStyleSheet(
+                "color: green; font-weight: bold; padding: 5px;"
+            )
+            self.iface.messageBar().pushSuccess(
+                "NASA OPERA", "Dependencies installed successfully!"
+            )
+            self._refresh_dependency_status()
+
+            QMessageBox.information(
+                self,
+                "Dependencies Installed",
+                "Dependencies have been installed successfully.\n\n"
+                "If the plugin does not work immediately, "
+                "please restart QGIS.",
+            )
+        else:
+            self.deps_overall_label.setText("Installation failed.")
+            self.deps_overall_label.setStyleSheet(
+                "color: red; font-weight: bold; padding: 5px;"
+            )
+            self.install_deps_btn.setEnabled(True)
+
+            QMessageBox.critical(
+                self,
+                "Installation Failed",
+                f"Failed to install dependencies:\n\n{message}\n\n"
+                "You can try installing manually with:\n"
+                "pip install earthaccess geopandas shapely pandas",
+            )
+
+        self._deps_worker = None
+
+    def show_dependencies_tab(self):
+        """Switch to the Dependencies tab programmatically."""
+        self.tab_widget.setCurrentIndex(0)
+
     def _create_credentials_tab(self):
         """Create the credentials settings tab."""
         widget = QWidget()
@@ -132,7 +352,7 @@ class SettingsDockWidget(QDockWidget):
             "Register at: https://urs.earthdata.nasa.gov/users/new"
         )
         info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #666; font-size: 10px; padding: 5px;")
+        info_label.setStyleSheet("font-size: 10px; padding: 5px;")
         earthdata_layout.addRow(info_label)
 
         # Username
@@ -156,7 +376,7 @@ class SettingsDockWidget(QDockWidget):
             "Note: Credentials are stored in ~/.netrc file for earthaccess."
         )
         netrc_label.setWordWrap(True)
-        netrc_label.setStyleSheet("color: #888; font-size: 9px; font-style: italic;")
+        netrc_label.setStyleSheet("font-size: 9px; font-style: italic;")
         earthdata_layout.addRow(netrc_label)
 
         layout.addWidget(earthdata_group)
