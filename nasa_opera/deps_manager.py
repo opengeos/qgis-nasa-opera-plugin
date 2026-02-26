@@ -10,6 +10,7 @@ directory is added to sys.path at runtime.
 
 import importlib
 import os
+import shutil
 import subprocess
 import sys
 from typing import Callable, Dict, List, Optional, Tuple
@@ -189,58 +190,97 @@ def _get_subprocess_kwargs() -> dict:
     return kwargs
 
 
-def create_venv(venv_dir: str) -> str:
-    """Create a virtual environment at the specified path.
+def _create_venv_with_env_builder(venv_dir: str) -> bool:
+    """Attempt to create a virtual environment using venv.EnvBuilder (in-process).
+
+    This avoids subprocess issues that occur with QGIS's embedded Python on
+    Windows, where ``python -m venv`` may create the directory structure but
+    fail to place the Python executable.
 
     Args:
         venv_dir: Path where the venv should be created.
 
     Returns:
-        Path to the Python executable inside the newly created venv.
+        True if the venv was created and the Python executable exists.
+    """
+    try:
+        import venv as venv_mod
+
+        builder = venv_mod.EnvBuilder(with_pip=True)
+        builder.create(venv_dir)
+        return os.path.isfile(get_venv_python_path(venv_dir))
+    except Exception:
+        return False
+
+
+def _try_copy_python_executable(venv_dir: str) -> bool:
+    """Copy the current Python executable into the venv as a recovery step.
+
+    This handles the case where venv creation produced the directory structure
+    but did not place the Python executable (known to happen with QGIS's
+    embedded Python on Windows).
+
+    Args:
+        venv_dir: Path to the venv directory.
+
+    Returns:
+        True if the Python executable now exists at the expected path.
+    """
+    python_path = get_venv_python_path(venv_dir)
+    if os.path.isfile(python_path):
+        return True
+
+    target_dir = os.path.dirname(python_path)
+    os.makedirs(target_dir, exist_ok=True)
+
+    try:
+        shutil.copy2(sys.executable, python_path)
+        return os.path.isfile(python_path)
+    except (OSError, shutil.SameFileError):
+        return False
+
+
+def _cleanup_partial_venv(venv_dir: str) -> None:
+    """Remove a partially created venv directory (best-effort).
+
+    Args:
+        venv_dir: Path to the venv directory to clean up.
+    """
+    if os.path.isdir(venv_dir):
+        try:
+            shutil.rmtree(venv_dir)
+        except OSError:
+            pass
+
+
+def _verify_pip_and_return(python_path: str) -> str:
+    """Ensure pip is available in the venv and return the python path.
+
+    Args:
+        python_path: Path to the venv's Python executable.
+
+    Returns:
+        The *python_path* if pip is verified.
 
     Raises:
-        RuntimeError: If venv creation fails.
+        RuntimeError: If pip cannot be made available.
     """
-    os.makedirs(os.path.dirname(venv_dir), exist_ok=True)
-
     env = _get_clean_env()
     kwargs = _get_subprocess_kwargs()
 
-    # Create venv
-    cmd = [sys.executable, "-m", "venv", venv_dir]
-    result = subprocess.run(
-        cmd,
+    # Try ensurepip (may already be present from EnvBuilder)
+    subprocess.run(
+        [python_path, "-m", "ensurepip", "--upgrade"],
         capture_output=True,
         text=True,
         timeout=120,
         env=env,
         **kwargs,
     )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Failed to create virtual environment:\n{result.stderr or result.stdout}"
-        )
 
-    python_path = get_venv_python_path(venv_dir)
-    if not os.path.isfile(python_path):
-        raise RuntimeError(
-            f"Venv was created but Python executable not found at: {python_path}"
-        )
-
-    # Ensure pip is available
-    ensurepip_cmd = [python_path, "-m", "ensurepip", "--upgrade"]
+    # Verify pip works
     result = subprocess.run(
-        ensurepip_cmd,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env=env,
-        **kwargs,
-    )
-    # ensurepip may fail if pip is already available, so we just verify pip works
-    pip_check_cmd = [python_path, "-m", "pip", "--version"]
-    result = subprocess.run(
-        pip_check_cmd,
+        [python_path, "-m", "pip", "--version"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -255,6 +295,84 @@ def create_venv(venv_dir: str) -> str:
         )
 
     return python_path
+
+
+def create_venv(venv_dir: str) -> str:
+    """Create a virtual environment at the specified path.
+
+    Uses a multi-strategy approach to handle embedded Python environments
+    (e.g. QGIS on Windows) where the standard subprocess-based venv creation
+    may fail to place the Python executable.
+
+    Strategy order:
+        1. In-process ``venv.EnvBuilder`` (most reliable for embedded Python).
+        2. Subprocess ``sys.executable -m venv`` (standard approach).
+        3. Recovery: copy ``sys.executable`` into the venv when the directory
+           was created but the executable is missing.
+
+    Args:
+        venv_dir: Path where the venv should be created.
+
+    Returns:
+        Path to the Python executable inside the newly created venv.
+
+    Raises:
+        RuntimeError: If venv creation fails after all strategies.
+    """
+    os.makedirs(os.path.dirname(venv_dir), exist_ok=True)
+
+    python_path = get_venv_python_path(venv_dir)
+
+    # Strategy 1: In-process EnvBuilder (avoids subprocess issues)
+    if _create_venv_with_env_builder(venv_dir):
+        return _verify_pip_and_return(python_path)
+
+    # Clean up partial venv before retrying
+    _cleanup_partial_venv(venv_dir)
+
+    # Strategy 2: Subprocess approach (original method)
+    env = _get_clean_env()
+    kwargs = _get_subprocess_kwargs()
+    subprocess_error = ""
+
+    cmd = [sys.executable, "-m", "venv", venv_dir]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+        **kwargs,
+    )
+
+    if result.returncode == 0 and os.path.isfile(python_path):
+        return _verify_pip_and_return(python_path)
+
+    if result.returncode != 0:
+        subprocess_error = result.stderr or result.stdout or ""
+
+    # Strategy 3: Recovery — venv dir exists but executable is missing
+    if os.path.isdir(venv_dir) and _try_copy_python_executable(venv_dir):
+        return _verify_pip_and_return(python_path)
+
+    # All strategies failed
+    details = [
+        f"Python executable: {sys.executable}",
+        f"Target venv: {venv_dir}",
+        f"Expected python: {python_path}",
+        f"Platform: {sys.platform}",
+    ]
+    if subprocess_error:
+        details.append(f"Subprocess error: {subprocess_error}")
+
+    raise RuntimeError(
+        "Failed to create virtual environment after trying multiple strategies.\n\n"
+        "This can happen when QGIS bundles Python in a way that prevents\n"
+        "standard venv creation.\n\n"
+        "You can try installing manually with:\n"
+        "  pip install earthaccess geopandas shapely pandas\n\n"
+        "Details:\n" + "\n".join(f"  {d}" for d in details)
+    )
 
 
 def install_packages(
