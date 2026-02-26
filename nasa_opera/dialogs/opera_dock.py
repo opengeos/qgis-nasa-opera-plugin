@@ -114,16 +114,20 @@ def _earthdata_login():
     """
     import earthaccess
 
-    auth = earthaccess.login(strategy="environment")
-    if not auth:
-        auth = earthaccess.login(strategy="netrc")
-    if not auth:
-        raise RuntimeError(
-            "NASA Earthdata authentication failed.\n\n"
-            "Please configure your credentials in the Settings tab "
-            "(Plugins > NASA OPERA > Settings) or set the "
-            "EARTHDATA_USERNAME and EARTHDATA_PASSWORD environment variables."
-        )
+    auth = None
+    for strategy in ("environment", "netrc"):
+        try:
+            auth = earthaccess.login(strategy=strategy)
+            if auth:
+                return
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        "NASA Earthdata authentication failed.\n\n"
+        "Please open the Settings tab (Plugins > NASA OPERA > Settings > "
+        "Credentials) and enter your Earthdata username and password."
+    )
 
 
 class SearchWorker(QThread):
