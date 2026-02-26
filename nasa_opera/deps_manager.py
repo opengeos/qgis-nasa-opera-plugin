@@ -262,9 +262,13 @@ def _find_python_executable() -> str:
 def _create_venv_with_env_builder(venv_dir: str) -> bool:
     """Attempt to create a virtual environment using venv.EnvBuilder (in-process).
 
-    This avoids subprocess issues that occur with QGIS's embedded Python on
-    Windows, where ``python -m venv`` may create the directory structure but
-    fail to place the Python executable.
+    .. warning::
+        ``EnvBuilder`` internally uses ``sys.executable`` to copy the Python
+        binary into the venv.  On QGIS Windows ``sys.executable`` is
+        ``qgis-bin.exe``, so this would copy QGIS itself and later subprocess
+        calls would launch a new QGIS instance.  Therefore this function is
+        **skipped** when ``sys.executable`` does not look like a Python
+        interpreter.
 
     Args:
         venv_dir: Path where the venv should be created.
@@ -272,6 +276,11 @@ def _create_venv_with_env_builder(venv_dir: str) -> bool:
     Returns:
         True if the venv was created and the Python executable exists.
     """
+    # Guard: only safe when sys.executable is actually Python.
+    exe_name = os.path.basename(sys.executable).lower()
+    if exe_name not in ("python.exe", "python3.exe", "python", "python3"):
+        return False
+
     try:
         import venv as venv_mod
 
@@ -370,14 +379,16 @@ def create_venv(venv_dir: str) -> str:
     """Create a virtual environment at the specified path.
 
     Uses a multi-strategy approach to handle embedded Python environments
-    (e.g. QGIS on Windows) where the standard subprocess-based venv creation
-    may fail to place the Python executable.
+    (e.g. QGIS on Windows) where ``sys.executable`` may point to
+    ``qgis-bin.exe`` rather than ``python.exe``.
 
     Strategy order:
-        1. In-process ``venv.EnvBuilder`` (most reliable for embedded Python).
-        2. Subprocess ``sys.executable -m venv`` (standard approach).
-        3. Recovery: copy ``sys.executable`` into the venv when the directory
-           was created but the executable is missing.
+        1. Subprocess using the real Python executable found by
+           ``_find_python_executable()`` (primary, works on Windows QGIS).
+        2. In-process ``venv.EnvBuilder`` (fallback, only when
+           ``sys.executable`` is already a Python interpreter).
+        3. Recovery: copy the real Python executable into the venv when the
+           directory was created but the executable is missing.
 
     Args:
         venv_dir: Path where the venv should be created.
@@ -392,19 +403,13 @@ def create_venv(venv_dir: str) -> str:
 
     python_path = get_venv_python_path(venv_dir)
 
-    # Strategy 1: In-process EnvBuilder (avoids subprocess issues)
-    if _create_venv_with_env_builder(venv_dir):
-        return _verify_pip_and_return(python_path)
-
-    # Clean up partial venv before retrying
-    _cleanup_partial_venv(venv_dir)
-
-    # Strategy 2: Subprocess approach (original method)
+    # Strategy 1: Subprocess with the real Python executable
+    python_exe = _find_python_executable()
     env = _get_clean_env()
     kwargs = _get_subprocess_kwargs()
     subprocess_error = ""
 
-    cmd = [_find_python_executable(), "-m", "venv", venv_dir]
+    cmd = [python_exe, "-m", "venv", venv_dir]
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -420,13 +425,37 @@ def create_venv(venv_dir: str) -> str:
     if result.returncode != 0:
         subprocess_error = result.stderr or result.stdout or ""
 
-    # Strategy 3: Recovery — venv dir exists but executable is missing
-    if os.path.isdir(venv_dir) and _try_copy_python_executable(venv_dir):
+    # Clean up partial venv before retrying
+    _cleanup_partial_venv(venv_dir)
+
+    # Strategy 2: In-process EnvBuilder (skipped when sys.executable is not Python)
+    if _create_venv_with_env_builder(venv_dir):
         return _verify_pip_and_return(python_path)
+
+    _cleanup_partial_venv(venv_dir)
+
+    # Strategy 3: Create venv without pip, then copy Python executable if needed
+    try:
+        result2 = subprocess.run(
+            [python_exe, "-m", "venv", "--without-pip", venv_dir],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+            **kwargs,
+        )
+        if result2.returncode == 0:
+            if not os.path.isfile(python_path):
+                _try_copy_python_executable(venv_dir)
+            if os.path.isfile(python_path):
+                return _verify_pip_and_return(python_path)
+    except Exception:
+        pass
 
     # All strategies failed
     details = [
-        f"Python executable: {sys.executable}",
+        f"sys.executable: {sys.executable}",
+        f"Python found: {python_exe}",
         f"Target venv: {venv_dir}",
         f"Expected python: {python_path}",
         f"Platform: {sys.platform}",
