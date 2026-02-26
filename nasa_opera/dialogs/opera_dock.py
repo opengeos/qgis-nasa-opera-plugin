@@ -106,6 +106,26 @@ OPERA_DATASETS = {
 }
 
 
+def _earthdata_login():
+    """Authenticate with NASA Earthdata using non-interactive strategies.
+
+    Raises:
+        RuntimeError: If authentication fails (credentials not configured).
+    """
+    import earthaccess
+
+    auth = earthaccess.login(strategy="environment")
+    if not auth:
+        auth = earthaccess.login(strategy="netrc")
+    if not auth:
+        raise RuntimeError(
+            "NASA Earthdata authentication failed.\n\n"
+            "Please configure your credentials in the Settings tab "
+            "(Plugins > NASA OPERA > Settings) or set the "
+            "EARTHDATA_USERNAME and EARTHDATA_PASSWORD environment variables."
+        )
+
+
 class SearchWorker(QThread):
     """Worker thread for searching NASA OPERA data."""
 
@@ -136,7 +156,7 @@ class SearchWorker(QThread):
             import earthaccess
 
             # Authenticate
-            earthaccess.login(persist=True)
+            _earthdata_login()
 
             self.progress.emit(f"Searching for {self.short_name}...")
 
@@ -276,7 +296,7 @@ class DownloadRasterWorker(QThread):
             import earthaccess
 
             self.progress.emit("Authenticating with NASA Earthdata...")
-            earthaccess.login(persist=True)
+            _earthdata_login()
 
             self.progress.emit(f"Downloading {self.layer_name}...")
 
@@ -364,7 +384,7 @@ class DownloadGranulesWorker(QThread):
             import earthaccess
 
             self.progress.emit("Authenticating with NASA Earthdata...")
-            earthaccess.login(persist=True)
+            _earthdata_login()
 
             os.makedirs(self.download_dir, exist_ok=True)
 
@@ -462,7 +482,7 @@ def setup_gdal_for_earthdata():
         from osgeo import gdal
 
         # Authenticate and get S3 credentials
-        earthaccess.login(persist=True)
+        _earthdata_login()
         s3_credentials = earthaccess.get_s3_credentials(daac="PODAAC")
 
         # Configure GDAL for S3 access
