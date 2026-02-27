@@ -2,7 +2,7 @@
 name=NASA OPERA
 qgisMinimumVersion=3.28
 description=Search and visualize NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products.
-version=0.5.0
+version=0.6.0
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -46,6 +46,8 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.6.0
+        - Use uv for faster dependency installation (#16)
     0.5.0
         - Fix cryptic 'lost sys.stdin' error (#14)
         - Fix Windows venv creation failure with QGIS embedded Python (#15)
