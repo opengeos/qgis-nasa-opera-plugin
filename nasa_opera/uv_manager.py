@@ -25,7 +25,9 @@ from qgis.PyQt.QtNetwork import QNetworkRequest
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".qgis_nasa_opera")
 UV_DIR = os.path.join(CACHE_DIR, "uv")
 
-# Pin a known-good uv version
+# Pin a known-good uv version.
+# Verified platforms: x86_64-pc-windows-msvc, x86_64-apple-darwin,
+# aarch64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu.
 UV_VERSION = "0.10.6"
 
 
@@ -89,8 +91,7 @@ def get_uv_download_url() -> str:
     platform_str, ext = _get_uv_platform_info()
     filename = f"uv-{platform_str}{ext}"
     return (
-        f"https://github.com/astral-sh/uv/releases/download/"
-        f"{UV_VERSION}/{filename}"
+        f"https://github.com/astral-sh/uv/releases/download/" f"{UV_VERSION}/{filename}"
     )
 
 
@@ -106,9 +107,7 @@ def _safe_extract_tar(tar, dest_dir):
     for member in tar.getmembers():
         member_path = os.path.realpath(os.path.join(dest_dir, member.name))
         if not member_path.startswith(dest_dir + os.sep) and member_path != dest_dir:
-            raise ValueError(
-                f"Attempted path traversal in tar archive: {member.name}"
-            )
+            raise ValueError(f"Attempted path traversal in tar archive: {member.name}")
         if use_filter:
             tar.extract(member, dest_dir, filter="data")
         else:
@@ -126,9 +125,7 @@ def _safe_extract_zip(zip_file, dest_dir):
     for member in zip_file.namelist():
         member_path = os.path.realpath(os.path.join(dest_dir, member))
         if not member_path.startswith(dest_dir + os.sep) and member_path != dest_dir:
-            raise ValueError(
-                f"Attempted path traversal in zip archive: {member}"
-            )
+            raise ValueError(f"Attempted path traversal in zip archive: {member}")
         zip_file.extract(member, dest_dir)
 
 
@@ -193,8 +190,7 @@ def download_uv(
             error_msg = request.errorMessage()
             if "404" in error_msg or "Not Found" in error_msg:
                 error_msg = (
-                    f"uv {UV_VERSION} not available for this platform. "
-                    f"URL: {url}"
+                    f"uv {UV_VERSION} not available for this platform. " f"URL: {url}"
                 )
             else:
                 error_msg = f"Download failed: {error_msg}"
@@ -238,7 +234,17 @@ def download_uv(
             uv_binary = _find_file_in_dir(extract_dir, uv_binary_name)
 
             if uv_binary is None:
-                return False, "uv binary not found in archive"
+                found_files = []
+                for root, _dirs, files in os.walk(extract_dir):
+                    found_files.extend(files)
+                    if len(found_files) >= 20:
+                        break
+                files_str = ", ".join(found_files[:20])
+                return False, (
+                    f"uv binary not found in archive. "
+                    f"Expected '{uv_binary_name}'. "
+                    f"Files found (up to 20): {files_str}"
+                )
 
             dest = get_uv_path()
             shutil.copy2(uv_binary, dest)
@@ -265,7 +271,7 @@ def download_uv(
         if success:
             if progress_callback:
                 progress_callback(100, f"uv {UV_VERSION} installed")
-            _log("uv installed successfully", Qgis.Success)
+            _log("uv installed successfully")
             return True, f"uv {UV_VERSION} installed successfully"
         else:
             return False, f"Verification failed: {verify_msg}"
@@ -318,7 +324,7 @@ def verify_uv() -> Tuple[bool, str]:
 
         if result.returncode == 0:
             version_output = result.stdout.strip()
-            _log(f"Verified uv: {version_output}", Qgis.Success)
+            _log(f"Verified uv: {version_output}")
             return True, version_output
         else:
             error = result.stderr or "Unknown error"
@@ -342,7 +348,7 @@ def remove_uv() -> Tuple[bool, str]:
 
     try:
         shutil.rmtree(UV_DIR)
-        _log("Removed uv installation", Qgis.Success)
+        _log("Removed uv installation")
         return True, "uv removed"
     except Exception as e:
         error_msg = f"Failed to remove uv: {str(e)}"
