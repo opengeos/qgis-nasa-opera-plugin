@@ -14,6 +14,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 from qgis.PyQt.QtCore import QThread, pyqtSignal
@@ -378,11 +379,14 @@ def _verify_pip_and_return(python_path: str) -> str:
 def create_venv(venv_dir: str) -> str:
     """Create a virtual environment at the specified path.
 
-    Uses a multi-strategy approach to handle embedded Python environments
-    (e.g. QGIS on Windows) where ``sys.executable`` may point to
-    ``qgis-bin.exe`` rather than ``python.exe``.
+    When uv is available, uses ``uv venv`` which is faster and does not
+    require pip to be bootstrapped inside the venv.
 
-    Strategy order:
+    Otherwise uses a multi-strategy approach to handle embedded Python
+    environments (e.g. QGIS on Windows) where ``sys.executable`` may point
+    to ``qgis-bin.exe`` rather than ``python.exe``.
+
+    Pip fallback strategy order:
         1. Subprocess using the real Python executable found by
            ``_find_python_executable()`` (primary, works on Windows QGIS).
         2. In-process ``venv.EnvBuilder`` (fallback, only when
@@ -399,14 +403,34 @@ def create_venv(venv_dir: str) -> str:
     Raises:
         RuntimeError: If venv creation fails after all strategies.
     """
+    from .uv_manager import get_uv_path, uv_exists
+
     os.makedirs(os.path.dirname(venv_dir), exist_ok=True)
 
     python_path = get_venv_python_path(venv_dir)
+    env = _get_clean_env()
+    kwargs = _get_subprocess_kwargs()
+
+    # Strategy 0: Use uv venv when available (fastest, no pip needed)
+    if uv_exists():
+        uv_path = get_uv_path()
+        python_exe = _find_python_executable()
+        cmd = [uv_path, "venv", "--python", python_exe, venv_dir]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+            **kwargs,
+        )
+        if result.returncode == 0 and os.path.isfile(python_path):
+            return python_path
+        # uv venv failed — clean up and fall through to pip strategies
+        _cleanup_partial_venv(venv_dir)
 
     # Strategy 1: Subprocess with the real Python executable
     python_exe = _find_python_executable()
-    env = _get_clean_env()
-    kwargs = _get_subprocess_kwargs()
     subprocess_error = ""
 
     cmd = [python_exe, "-m", "venv", venv_dir]
@@ -480,6 +504,9 @@ def install_packages(
 ) -> Tuple[bool, str]:
     """Install packages into the virtual environment.
 
+    Uses uv when available for significantly faster installation,
+    falling back to pip otherwise.
+
     Args:
         venv_dir: Path to the venv directory.
         packages: List of pip package names to install.
@@ -488,22 +515,37 @@ def install_packages(
     Returns:
         Tuple of (success, message).
     """
+    from .uv_manager import get_uv_path, uv_exists
+
     python_path = get_venv_python_path(venv_dir)
     env = _get_clean_env()
     kwargs = _get_subprocess_kwargs()
 
-    cmd = [
-        python_path,
-        "-m",
-        "pip",
-        "install",
-        "--upgrade",
-        "--disable-pip-version-check",
-        "--prefer-binary",
-    ] + packages
+    use_uv = uv_exists()
+    if use_uv:
+        uv_path = get_uv_path()
+        cmd = [
+            uv_path,
+            "pip",
+            "install",
+            "--python",
+            python_path,
+            "--upgrade",
+        ] + packages
+    else:
+        cmd = [
+            python_path,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--disable-pip-version-check",
+            "--prefer-binary",
+        ] + packages
 
     if progress_callback:
-        progress_callback(20, f"Installing: {', '.join(packages)}...")
+        installer = "uv" if use_uv else "pip"
+        progress_callback(20, f"Installing ({installer}): {', '.join(packages)}...")
 
     result = subprocess.run(
         cmd,
@@ -519,7 +561,8 @@ def install_packages(
         # Truncate long error messages
         if len(error_output) > 1000:
             error_output = "..." + error_output[-1000:]
-        return False, f"pip install failed:\n{error_output}"
+        installer = "uv pip" if use_uv else "pip"
+        return False, f"{installer} install failed:\n{error_output}"
 
     return True, "Packages installed successfully."
 
@@ -531,9 +574,26 @@ class DepsInstallWorker(QThread):
     finished = pyqtSignal(bool, str)
 
     def run(self):
-        """Execute venv creation and dependency installation."""
+        """Execute uv download, venv creation, and dependency installation."""
         try:
+            from .uv_manager import download_uv, uv_exists
+
+            start_time = time.time()
             venv_dir = get_venv_dir()
+
+            # Step 0: Download uv if needed (fast package installer)
+            if not uv_exists():
+                self.progress.emit(2, "Downloading uv package installer...")
+                success, msg = download_uv(
+                    progress_callback=lambda p, m: self.progress.emit(
+                        2 + int(p * 0.03), m
+                    ),
+                )
+                if not success:
+                    # Non-fatal: fall back to pip
+                    self.progress.emit(5, "uv unavailable, using pip instead.")
+                else:
+                    self.progress.emit(5, "uv ready.")
 
             # Step 1: Create venv if needed
             if not venv_exists():
@@ -545,29 +605,31 @@ class DepsInstallWorker(QThread):
                     return
             self.progress.emit(10, "Virtual environment ready.")
 
-            # Step 2: Verify pip
-            self.progress.emit(12, "Verifying pip...")
-            python_path = get_venv_python_path(venv_dir)
-            env = _get_clean_env()
-            kwargs = _get_subprocess_kwargs()
+            # Step 2: Verify pip (only needed when not using uv)
+            use_uv = uv_exists()
+            if not use_uv:
+                self.progress.emit(12, "Verifying pip...")
+                python_path = get_venv_python_path(venv_dir)
+                env = _get_clean_env()
+                kwargs = _get_subprocess_kwargs()
 
-            result = subprocess.run(
-                [python_path, "-m", "pip", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=env,
-                **kwargs,
-            )
-            if result.returncode != 0:
-                self.finished.emit(
-                    False,
-                    "pip is not available in the virtual environment.\n"
-                    "Please install dependencies manually:\n"
-                    "pip install earthaccess geopandas shapely pandas",
+                result = subprocess.run(
+                    [python_path, "-m", "pip", "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=env,
+                    **kwargs,
                 )
-                return
-            self.progress.emit(15, "pip is available.")
+                if result.returncode != 0:
+                    self.finished.emit(
+                        False,
+                        "pip is not available in the virtual environment.\n"
+                        "Please install dependencies manually:\n"
+                        "pip install earthaccess geopandas shapely pandas",
+                    )
+                    return
+            self.progress.emit(15, "Package installer ready.")
 
             # Step 3: Install missing packages
             missing = get_missing_packages()
@@ -595,6 +657,14 @@ class DepsInstallWorker(QThread):
             # Step 5: Verify imports
             self.progress.emit(95, "Verifying installations...")
             still_missing = get_missing_packages()
+
+            elapsed = time.time() - start_time
+            if elapsed >= 60:
+                minutes, seconds = divmod(int(round(elapsed)), 60)
+                elapsed_str = f"{minutes}:{seconds:02d}"
+            else:
+                elapsed_str = f"{elapsed:.1f}s"
+
             if still_missing:
                 self.finished.emit(
                     False,
@@ -603,8 +673,11 @@ class DepsInstallWorker(QThread):
                     "You may need to restart QGIS for changes to take effect.",
                 )
             else:
-                self.progress.emit(100, "All dependencies installed!")
-                self.finished.emit(True, "All dependencies installed successfully!")
+                self.progress.emit(100, f"All dependencies installed in {elapsed_str}!")
+                self.finished.emit(
+                    True,
+                    f"All dependencies installed successfully in {elapsed_str}!",
+                )
 
         except subprocess.TimeoutExpired:
             self.finished.emit(False, "Installation timed out after 10 minutes.")
