@@ -3,7 +3,7 @@
 [![QGIS](https://img.shields.io/badge/QGIS-3.28+-green.svg)](https://qgis.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A QGIS plugin for searching and visualizing NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products.
+A QGIS plugin for searching, visualizing, and analyzing NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products -- with an AI assistant for natural language interaction.
 
 ## About NASA OPERA
 
@@ -15,7 +15,10 @@ Learn more: [NASA OPERA Project](https://www.jpl.nasa.gov/go/opera)
 
 - **Search Interface**: Search NASA OPERA products by location, date range, and dataset type
 - **Footprint Visualization**: Display search result footprints as vector layers on the map
-- **Raster Display**: Visualize OPERA raster data directly in QGIS
+- **Raster Display**: Visualize OPERA raster data directly in QGIS with cloud-optimized streaming
+- **Virtual Mosaics**: Combine multiple granules into seamless mosaics via GDAL VRT
+- **AI Assistant**: Use natural language to search, display, and analyze OPERA data (powered by LLMs)
+- **Multiple LLM Providers**: OpenAI, Anthropic, Amazon Bedrock, Google Gemini, and local Ollama
 - **Multiple Datasets**: Support for all OPERA products:
   - DSWX-HLS: Dynamic Surface Water Extent from Harmonized Landsat Sentinel-2
   - DSWX-S1: Dynamic Surface Water Extent from Sentinel-1
@@ -23,7 +26,7 @@ Learn more: [NASA OPERA Project](https://www.jpl.nasa.gov/go/opera)
   - DIST-ANN-HLS: Land Surface Disturbance Annual
   - RTC-S1: Radiometric Terrain Corrected SAR Backscatter
   - CSLC-S1: Coregistered Single-Look Complex
-- **Settings Panel**: Configure Earthdata credentials and display options
+- **Settings Panel**: Configure Earthdata credentials, display options, and AI provider
 - **Update Checker**: Check for plugin updates from GitHub
 
 ## Prerequisites
@@ -38,17 +41,16 @@ To access NASA OPERA data, you need a free NASA Earthdata account:
 
 ### Python Dependencies
 
-The plugin requires the following Python packages:
+The plugin manages dependencies automatically via an isolated virtual environment. On first use, open **Settings > Dependencies** and click **Install Dependencies** to install:
 
-```bash
-pip install earthaccess geopandas shapely pandas
-```
+- `earthaccess` - NASA Earthdata search and download
+- `geopandas` - Geospatial data manipulation
+- `shapely` - Geometry operations
+- `pandas` - Data analysis
 
-Or if using conda:
+For the AI Assistant, open **Settings > AI Assistant** and click **Install AI Dependencies** to install:
 
-```bash
-conda install -c conda-forge earthaccess geopandas shapely pandas
-```
+- `litellm` - Unified LLM interface for multiple providers
 
 ## Installation
 
@@ -75,7 +77,7 @@ conda install -c conda-forge earthaccess geopandas shapely pandas
 3. Restart QGIS
 
 4. Enable the plugin:
-   - Go to **Plugins → Manage and Install Plugins...**
+   - Go to **Plugins > Manage and Install Plugins...**
    - Search for "NASA OPERA"
    - Check the box to enable it
 
@@ -94,7 +96,7 @@ conda install -c conda-forge earthaccess geopandas shapely pandas
 
 ### Basic Workflow
 
-1. **Open the Plugin**: Click the NASA OPERA icon in the toolbar or go to **NASA OPERA → NASA OPERA Search**
+1. **Open the Plugin**: Click the NASA OPERA icon in the toolbar or go to **NASA OPERA > NASA OPERA Search**
 
 2. **Select Dataset**: Choose the OPERA product you want to search for
 
@@ -108,14 +110,49 @@ conda install -c conda-forge earthaccess geopandas shapely pandas
 5. **View Results**:
    - **Show Footprints**: Display the spatial coverage of search results
    - **Display Single**: Load a specific granule's raster data
+   - **Display Mosaic**: Create a virtual mosaic from selected granules
+
+### AI Assistant
+
+The AI Assistant lets you interact with NASA OPERA data using natural language.
+
+1. **Setup**: Go to **NASA OPERA > Settings > AI Assistant** tab
+   - Install AI dependencies (litellm)
+   - Select your LLM provider (OpenAI, Anthropic, Bedrock, Gemini, or Ollama)
+   - Enter your API key (not required for Ollama)
+   - Click "Test Connection" to verify
+
+2. **Open**: Click the AI Assistant icon in the toolbar or go to **NASA OPERA > AI Assistant**
+
+3. **Ask Questions**: Type natural language queries such as:
+   - "What OPERA datasets are available?"
+   - "Search for surface water data in my current map extent"
+   - "Find land disturbance alerts in California from 2024"
+   - "Show me the latest DSWX-HLS data for Las Vegas area"
+   - "Create a mosaic of the first 5 results"
+   - "What layers do I have loaded?"
+
+The AI assistant can search data, display footprints, load rasters, create mosaics, and manage map layers -- all through conversation.
+
+**Supported LLM Providers:**
+
+| Provider | Default Model | API Key Required |
+|----------|--------------|-----------------|
+| OpenAI | gpt-4.1 | Yes |
+| Anthropic | claude-sonnet-4-6 | Yes |
+| Amazon Bedrock | claude-sonnet-4-20250514 | AWS credentials |
+| Google Gemini | gemini-2.5-flash | Yes |
+| Ollama | llama3.3 | No (local) |
 
 ### Settings
 
-Access settings via **NASA OPERA → Settings**:
+Access settings via **NASA OPERA > Settings**:
 
+- **Dependencies**: Install and manage core Python packages
 - **Credentials**: Configure your NASA Earthdata username and password
 - **Display**: Customize footprint styles and default colormap
 - **Advanced**: Set default search parameters and cache options
+- **AI Assistant**: Configure LLM provider, model, API key, and parameters
 
 ### First-Time Authentication
 
@@ -135,8 +172,18 @@ qgis-nasa-opera-plugin/
 │   ├── __init__.py            # Plugin entry point
 │   ├── nasa_opera.py          # Main plugin class
 │   ├── metadata.txt           # Plugin metadata
-│   ├── dialogs/               # Dialog widgets
+│   ├── deps_manager.py        # Dependency management (isolated venv)
+│   ├── uv_manager.py          # uv package installer
+│   ├── ai/                    # AI agent module
+│   │   ├── __init__.py
+│   │   ├── llm_client.py      # litellm wrapper (multi-provider)
+│   │   ├── agent.py           # Agent loop orchestration
+│   │   ├── tools.py           # Tool registry + 10 core tools
+│   │   ├── workers.py         # QThread worker for async LLM calls
+│   │   └── oauth.py           # OAuth PKCE flow
+│   ├── dialogs/               # UI widgets
 │   │   ├── opera_dock.py      # Main search interface
+│   │   ├── ai_chat_dock.py    # AI chat interface
 │   │   ├── settings_dock.py   # Settings panel
 │   │   └── update_checker.py  # Update checker dialog
 │   └── icons/                 # Plugin icons
@@ -160,21 +207,6 @@ python package_plugin.py
 
 This creates `nasa_opera-{version}.zip` ready for upload to the QGIS Plugin Repository.
 
-### Testing
-
-To test the plugin in QGIS with a specific conda environment:
-
-```bash
-# Activate your environment
-conda activate geo
-
-# Install the plugin
-python install.py
-
-# Start QGIS
-qgis
-```
-
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
@@ -193,6 +225,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [NASA OPERA Project](https://www.jpl.nasa.gov/go/opera) for providing the data products
 - [earthaccess](https://github.com/nsidc/earthaccess) for NASA Earthdata access
+- [litellm](https://github.com/BerriAI/litellm) for unified LLM provider access
 - [leafmap](https://github.com/opengeos/leafmap) for inspiration on the GUI design
 - The QGIS community for the excellent GIS platform
 
@@ -201,14 +234,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Bug Reports**: [GitHub Issues](https://github.com/opengeos/qgis-nasa-opera-plugin/issues)
 - **Feature Requests**: [GitHub Issues](https://github.com/opengeos/qgis-nasa-opera-plugin/issues)
 - **Documentation**: [GitHub Wiki](https://github.com/opengeos/qgis-nasa-opera-plugin/wiki)
-
-## Changelog
-
-### 0.1.0 (Initial Release)
-
-- NASA OPERA data search interface
-- Support for all OPERA products (DSWX-HLS, DSWX-S1, DIST-ALERT, DIST-ANN, RTC-S1, CSLC-S1)
-- Footprint visualization
-- Raster layer display
-- Settings panel with Earthdata credentials
-- Update checker
