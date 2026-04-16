@@ -27,6 +27,11 @@ REQUIRED_PACKAGES = [
     ("pandas", "pandas"),
 ]
 
+# AI/LLM packages: installed separately so core plugin works without them
+AI_PACKAGES = [
+    ("litellm", "litellm"),
+]
+
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".qgis_nasa_opera")
 PYTHON_VERSION = f"py{sys.version_info.major}.{sys.version_info.minor}"
 
@@ -154,6 +159,48 @@ def get_missing_packages() -> List[str]:
         List of pip package names that are not currently importable.
     """
     return [dep["pip_name"] for dep in check_dependencies() if not dep["installed"]]
+
+
+def check_ai_dependencies() -> List[Dict]:
+    """Check if AI/LLM Python packages are importable.
+
+    Returns:
+        List of dicts with keys: name, pip_name, installed, version.
+    """
+    results = []
+    for import_name, pip_name in AI_PACKAGES:
+        info: Dict = {
+            "name": import_name,
+            "pip_name": pip_name,
+            "installed": False,
+            "version": None,
+        }
+        try:
+            mod = importlib.import_module(import_name)
+            info["installed"] = True
+            info["version"] = getattr(mod, "__version__", "installed")
+        except ImportError:
+            pass
+        results.append(info)
+    return results
+
+
+def all_ai_dependencies_met() -> bool:
+    """Return True if all AI/LLM packages are importable.
+
+    Returns:
+        True if all AI dependencies are installed and importable.
+    """
+    return all(dep["installed"] for dep in check_ai_dependencies())
+
+
+def get_missing_ai_packages() -> List[str]:
+    """Return pip install names of missing AI packages.
+
+    Returns:
+        List of pip package names that are not currently importable.
+    """
+    return [dep["pip_name"] for dep in check_ai_dependencies() if not dep["installed"]]
 
 
 def _get_clean_env() -> dict:

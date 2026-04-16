@@ -30,6 +30,7 @@ class NasaOpera:
         # Dock widgets (lazy loaded)
         self._opera_dock = None
         self._settings_dock = None
+        self._ai_chat_dock = None
 
     def add_action(
         self,
@@ -115,6 +116,20 @@ class NasaOpera:
             parent=self.iface.mainWindow(),
         )
 
+        # Add AI Assistant action (checkable for dock toggle)
+        ai_icon = os.path.join(icon_base, "ai_chat.svg")
+        if not os.path.exists(ai_icon):
+            ai_icon = ":/images/themes/default/mActionHelpContents.svg"
+
+        self.ai_chat_action = self.add_action(
+            ai_icon,
+            "AI Assistant",
+            self.toggle_ai_chat_dock,
+            status_tip="Toggle AI Assistant Chat Panel",
+            checkable=True,
+            parent=self.iface.mainWindow(),
+        )
+
         # Add Settings Panel action (checkable for dock toggle)
         self.settings_action = self.add_action(
             settings_icon,
@@ -163,6 +178,11 @@ class NasaOpera:
             self.iface.removeDockWidget(self._settings_dock)
             self._settings_dock.deleteLater()
             self._settings_dock = None
+
+        if self._ai_chat_dock:
+            self.iface.removeDockWidget(self._ai_chat_dock)
+            self._ai_chat_dock.deleteLater()
+            self._ai_chat_dock = None
 
         # Remove actions from menu
         for action in self.actions:
@@ -238,6 +258,68 @@ class NasaOpera:
     def _on_opera_visibility_changed(self, visible):
         """Handle Opera dock visibility change."""
         self.opera_action.setChecked(visible)
+
+    def toggle_ai_chat_dock(self):
+        """Toggle the AI Assistant chat dock widget visibility."""
+        if self._ai_chat_dock is None:
+            # Check AI dependencies
+            try:
+                from .deps_manager import all_ai_dependencies_met
+
+                if not all_ai_dependencies_met():
+                    reply = QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "AI Dependencies Missing",
+                        "The AI Assistant requires the litellm package.\n\n"
+                        "Would you like to open Settings to install it?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes,
+                    )
+                    if reply == QMessageBox.Yes:
+                        self.ai_chat_action.setChecked(False)
+                        self.toggle_settings_dock()
+                        if self._settings_dock is not None:
+                            self._settings_dock.show_ai_tab()
+                        return
+                    self.ai_chat_action.setChecked(False)
+                    return
+            except Exception:
+                pass
+
+            try:
+                from .dialogs.ai_chat_dock import AIChatDockWidget
+
+                self._ai_chat_dock = AIChatDockWidget(
+                    self.iface, self.iface.mainWindow()
+                )
+                self._ai_chat_dock.setObjectName("NasaOperaAIChatDock")
+                self._ai_chat_dock.visibilityChanged.connect(
+                    self._on_ai_chat_visibility_changed
+                )
+                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._ai_chat_dock)
+                self._ai_chat_dock.show()
+                self._ai_chat_dock.raise_()
+                return
+
+            except Exception as e:
+                QMessageBox.critical(
+                    self.iface.mainWindow(),
+                    "Error",
+                    f"Failed to create AI Assistant panel:\n{str(e)}",
+                )
+                self.ai_chat_action.setChecked(False)
+                return
+
+        # Toggle visibility
+        if self._ai_chat_dock.isVisible():
+            self._ai_chat_dock.hide()
+        else:
+            self._ai_chat_dock.show()
+            self._ai_chat_dock.raise_()
+
+    def _on_ai_chat_visibility_changed(self, visible):
+        """Handle AI chat dock visibility change."""
+        self.ai_chat_action.setChecked(visible)
 
     def toggle_settings_dock(self):
         """Toggle the Settings dock widget visibility."""
