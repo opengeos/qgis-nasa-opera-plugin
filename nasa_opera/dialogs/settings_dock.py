@@ -5,6 +5,8 @@ This module provides a settings panel for configuring the NASA OPERA plugin,
 including Earthdata credentials and display options.
 """
 
+import sys
+
 from qgis.PyQt.QtCore import Qt, QSettings
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
@@ -44,7 +46,9 @@ class SettingsDockWidget(QDockWidget):
         self.iface = iface
         self.settings = QSettings()
 
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
 
         self._setup_ui()
         self._load_settings()
@@ -65,7 +69,7 @@ class SettingsDockWidget(QDockWidget):
         header_font.setPointSize(12)
         header_font.setBold(True)
         header_label.setFont(header_font)
-        header_label.setAlignment(Qt.AlignCenter)
+        header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_label.setStyleSheet("color: #1565C0; padding: 5px;")
         layout.addWidget(header_label)
 
@@ -366,7 +370,7 @@ class SettingsDockWidget(QDockWidget):
 
         # Password
         self.password_input = QLineEdit()
-        self.password_input.setEchoMode(QLineEdit.Password)
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_input.setPlaceholderText("Earthdata password")
         earthdata_layout.addRow("Password:", self.password_input)
 
@@ -577,7 +581,7 @@ class SettingsDockWidget(QDockWidget):
         auth_layout = QFormLayout(auth_group)
 
         self.ai_api_key_input = QLineEdit()
-        self.ai_api_key_input.setEchoMode(QLineEdit.Password)
+        self.ai_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.ai_api_key_input.setPlaceholderText("Enter API key")
         auth_layout.addRow("API Key:", self.ai_api_key_input)
 
@@ -864,8 +868,9 @@ class SettingsDockWidget(QDockWidget):
                     "Please click 'Install AI Dependencies' first.",
                 )
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            # Dependency check is best-effort; fall through to existing behavior.
+            print(f"NASA OPERA: AI dependency check failed: {exc}", file=sys.stderr)
 
         provider_map = {
             "OpenAI": "openai",
@@ -974,11 +979,11 @@ class SettingsDockWidget(QDockWidget):
             self,
             "Clear Cache",
             f"Are you sure you want to clear the cache?\n{cache_dir}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
 
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             import shutil
             import os
 
@@ -1201,11 +1206,11 @@ class SettingsDockWidget(QDockWidget):
             self,
             "Reset Settings",
             "Are you sure you want to reset all settings to defaults?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
 
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         # Credentials - don't reset

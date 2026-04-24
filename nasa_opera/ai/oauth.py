@@ -24,17 +24,30 @@ from qgis.PyQt.QtGui import QDesktopServices
 OAUTH_CONFIG = {
     "anthropic": {
         "auth_url": "https://console.anthropic.com/oauth/authorize",
-        "token_url": "https://console.anthropic.com/oauth/token",
+        "token_url": "https://console.anthropic.com/oauth/token",  # nosec B105
         "client_id": "",
         "scope": "api",
     },
     "openai": {
         "auth_url": "https://platform.openai.com/oauth/authorize",
-        "token_url": "https://platform.openai.com/oauth/token",
+        "token_url": "https://platform.openai.com/oauth/token",  # nosec B105
         "client_id": "",
         "scope": "api",
     },
 }
+
+
+def _require_https(url: str) -> None:
+    """Reject any URL that does not use the https scheme.
+
+    Args:
+        url: URL string to validate.
+
+    Raises:
+        ValueError: If the URL is not https.
+    """
+    if not url.lower().startswith("https://"):
+        raise ValueError(f"Refusing non-https URL: {url!r}")
 
 
 def _generate_pkce_pair() -> Tuple[str, str]:
@@ -224,6 +237,7 @@ class OAuthFlow:
             }
         ).encode("utf-8")
 
+        _require_https(config["token_url"])
         req = urllib.request.Request(
             config["token_url"],
             data=data,
@@ -231,7 +245,7 @@ class OAuthFlow:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
                 token_data = json.loads(response.read().decode("utf-8"))
         except Exception as e:
             return False, f"Token exchange failed: {e}"

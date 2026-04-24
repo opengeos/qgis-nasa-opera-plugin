@@ -11,6 +11,7 @@ This module provides the main NASA OPERA search interface that allows users to:
 import os
 import json
 import math
+import sys
 import tempfile
 from datetime import datetime, date
 from typing import Optional, List, Tuple
@@ -120,7 +121,11 @@ def _earthdata_login():
             auth = earthaccess.login(strategy=strategy)
             if auth:
                 return
-        except Exception:
+        except Exception as exc:
+            print(
+                f"NASA OPERA: earthaccess login via {strategy} failed: {exc}",
+                file=sys.stderr,
+            )
             continue
 
     raise RuntimeError(
@@ -567,7 +572,9 @@ class RectangleMapTool(QgsMapToolEmitPoint):
         # Create rubber band for visual feedback
         if self.rubber_band is not None:
             self.canvas.scene().removeItem(self.rubber_band)
-        self.rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
+        self.rubber_band = QgsRubberBand(
+            self.canvas, QgsWkbTypes.GeometryType.PolygonGeometry
+        )
         self.rubber_band.setColor(QColor(255, 0, 0, 100))
         self.rubber_band.setWidth(2)
         self._update_rubber_band()
@@ -610,7 +617,7 @@ class RectangleMapTool(QgsMapToolEmitPoint):
         """Update the rubber band rectangle display."""
         if self.rubber_band is None:
             return
-        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+        self.rubber_band.reset(QgsWkbTypes.GeometryType.PolygonGeometry)
         rect = QgsRectangle(self.start_point, self.end_point)
         rect.normalize()
         self.rubber_band.addPoint(QgsPointXY(rect.xMinimum(), rect.yMinimum()), False)
@@ -653,7 +660,9 @@ class OperaDockWidget(QDockWidget):
         # Selection sync guard flag
         self._sync_in_progress = False
 
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
 
         self._setup_ui()
 
@@ -674,7 +683,7 @@ class OperaDockWidget(QDockWidget):
         header_font.setPointSize(11)
         header_font.setBold(True)
         header_label.setFont(header_font)
-        header_label.setAlignment(Qt.AlignCenter)
+        header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_label.setStyleSheet("color: #64B5F6; padding: 5px;")
         layout.addWidget(header_label)
 
@@ -804,19 +813,23 @@ class OperaDockWidget(QDockWidget):
 
         self.granule_table = QTableWidget()
         self.granule_table.setEnabled(False)
-        self.granule_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.granule_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.granule_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.granule_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
         self.granule_table.setColumnCount(4)
         self.granule_table.setHorizontalHeaderLabels(
             ["Granule ID", "Begin Date", "End Date", "Links"]
         )
         self.granule_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Interactive
+            QHeaderView.ResizeMode.Interactive
         )
         self.granule_table.horizontalHeader().setStretchLastSection(True)
         self.granule_table.setSortingEnabled(True)
         self.granule_table.setMinimumHeight(120)
-        self.granule_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.granule_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.granule_table.itemSelectionChanged.connect(
             self._on_granule_selection_changed
         )
@@ -1071,7 +1084,7 @@ class OperaDockWidget(QDockWidget):
 
             native_id = result.get("meta", {}).get("native-id", f"Granule {i + 1}")
             id_item = QTableWidgetItem(native_id)
-            id_item.setData(Qt.UserRole, i)  # Store granule index
+            id_item.setData(Qt.ItemDataRole.UserRole, i)  # Store granule index
             id_item.setToolTip(native_id)
             self.granule_table.setItem(row, 0, id_item)
 
@@ -1097,7 +1110,7 @@ class OperaDockWidget(QDockWidget):
             self.granule_table.setItem(row, 2, QTableWidgetItem(end_date))
 
             links_item = QTableWidgetItem()
-            links_item.setData(Qt.DisplayRole, num_links)  # Numeric sort
+            links_item.setData(Qt.ItemDataRole.DisplayRole, num_links)  # Numeric sort
             self.granule_table.setItem(row, 3, links_item)
 
         self.granule_table.setSortingEnabled(True)  # Re-enable sorting
@@ -1153,7 +1166,7 @@ class OperaDockWidget(QDockWidget):
         item = self.granule_table.item(first_row, 0)
         if item is None:
             return
-        index = item.data(Qt.UserRole)
+        index = item.data(Qt.ItemDataRole.UserRole)
 
         if index is None or index >= len(self._results):
             return
@@ -1199,7 +1212,7 @@ class OperaDockWidget(QDockWidget):
             for row in selected_rows:
                 item = self.granule_table.item(row, 0)
                 if item is not None:
-                    granule_index = item.data(Qt.UserRole)
+                    granule_index = item.data(Qt.ItemDataRole.UserRole)
                     if granule_index is not None:
                         feature_ids.append(granule_index)
 
@@ -1231,7 +1244,7 @@ class OperaDockWidget(QDockWidget):
             for row in range(self.granule_table.rowCount()):
                 item = self.granule_table.item(row, 0)
                 if item is not None:
-                    granule_index = item.data(Qt.UserRole)
+                    granule_index = item.data(Qt.ItemDataRole.UserRole)
                     if granule_index is not None:
                         index_to_row[granule_index] = row
 
@@ -1274,7 +1287,9 @@ class OperaDockWidget(QDockWidget):
             return
 
         first_row = min(selected_rows)
-        granule_index = self.granule_table.item(first_row, 0).data(Qt.UserRole)
+        granule_index = self.granule_table.item(first_row, 0).data(
+            Qt.ItemDataRole.UserRole
+        )
         if granule_index is None or granule_index >= len(self._results):
             QMessageBox.warning(self, "Error", "No valid granule selected")
             return
@@ -1342,7 +1357,7 @@ class OperaDockWidget(QDockWidget):
             busy: True to show waiting cursor, False to restore normal cursor
         """
         if busy:
-            QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+            QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
             self.display_single_btn.setEnabled(False)
             self.display_mosaic_btn.setEnabled(False)
             self.download_single_layer_btn.setEnabled(False)
@@ -1550,7 +1565,9 @@ class OperaDockWidget(QDockWidget):
 
             total_granules = num_selected
             for idx, row in enumerate(sorted(selected_rows)):
-                granule_index = self.granule_table.item(row, 0).data(Qt.UserRole)
+                granule_index = self.granule_table.item(row, 0).data(
+                    Qt.ItemDataRole.UserRole
+                )
                 if granule_index is None or granule_index >= len(self._results):
                     self.progress_bar.setValue(idx + 1)
                     continue
@@ -1909,7 +1926,7 @@ class OperaDockWidget(QDockWidget):
 
         granules = []
         for row in sorted(selected_rows):
-            index = self.granule_table.item(row, 0).data(Qt.UserRole)
+            index = self.granule_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
             if index is not None and index < len(self._results):
                 granules.append(self._results[index])
         return granules
@@ -2107,12 +2124,18 @@ class OperaDockWidget(QDockWidget):
                 if hasattr(worker, "cancel"):
                     try:
                         worker.cancel()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        print(
+                            f"NASA OPERA: worker.cancel() failed: {exc}",
+                            file=sys.stderr,
+                        )
                 if hasattr(worker, "wait"):
                     try:
                         worker.wait()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        print(
+                            f"NASA OPERA: worker.wait() failed: {exc}",
+                            file=sys.stderr,
+                        )
 
         event.accept()

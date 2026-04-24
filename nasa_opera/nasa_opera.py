@@ -6,6 +6,7 @@ integration, menu items, toolbar buttons, and dockable panels.
 """
 
 import os
+import sys
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
@@ -212,10 +213,10 @@ class NasaOpera:
                         "that are not installed.\n\n"
                         "Would you like to open the Settings panel to "
                         "install them?",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.Yes,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes,
                     )
-                    if reply == QMessageBox.Yes:
+                    if reply == QMessageBox.StandardButton.Yes:
                         self.opera_action.setChecked(False)
                         self.toggle_settings_dock()
                         if self._settings_dock is not None:
@@ -223,8 +224,9 @@ class NasaOpera:
                         return
                     self.opera_action.setChecked(False)
                     return
-            except Exception:
-                pass  # Fall through to existing behavior
+            except Exception as exc:
+                # Dependency check is best-effort; fall through to existing behavior.
+                print(f"NASA OPERA: dependency check failed: {exc}", file=sys.stderr)
 
             try:
                 from .dialogs.opera_dock import OperaDockWidget
@@ -234,7 +236,9 @@ class NasaOpera:
                 self._opera_dock.visibilityChanged.connect(
                     self._on_opera_visibility_changed
                 )
-                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._opera_dock)
+                self.iface.addDockWidget(
+                    Qt.DockWidgetArea.RightDockWidgetArea, self._opera_dock
+                )
                 self._opera_dock.show()
                 self._opera_dock.raise_()
                 return
@@ -272,10 +276,10 @@ class NasaOpera:
                         "AI Dependencies Missing",
                         "The AI Assistant requires the litellm package.\n\n"
                         "Would you like to open Settings to install it?",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.Yes,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes,
                     )
-                    if reply == QMessageBox.Yes:
+                    if reply == QMessageBox.StandardButton.Yes:
                         self.ai_chat_action.setChecked(False)
                         self.toggle_settings_dock()
                         if self._settings_dock is not None:
@@ -283,8 +287,9 @@ class NasaOpera:
                         return
                     self.ai_chat_action.setChecked(False)
                     return
-            except Exception:
-                pass
+            except Exception as exc:
+                # Dependency check is best-effort; fall through to existing behavior.
+                print(f"NASA OPERA: AI dependency check failed: {exc}", file=sys.stderr)
 
             try:
                 from .dialogs.ai_chat_dock import AIChatDockWidget
@@ -296,7 +301,9 @@ class NasaOpera:
                 self._ai_chat_dock.visibilityChanged.connect(
                     self._on_ai_chat_visibility_changed
                 )
-                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._ai_chat_dock)
+                self.iface.addDockWidget(
+                    Qt.DockWidgetArea.RightDockWidgetArea, self._ai_chat_dock
+                )
                 self._ai_chat_dock.show()
                 self._ai_chat_dock.raise_()
                 return
@@ -334,7 +341,9 @@ class NasaOpera:
                 self._settings_dock.visibilityChanged.connect(
                     self._on_settings_visibility_changed
                 )
-                self.iface.addDockWidget(Qt.RightDockWidgetArea, self._settings_dock)
+                self.iface.addDockWidget(
+                    Qt.DockWidgetArea.RightDockWidgetArea, self._settings_dock
+                )
                 self._settings_dock.show()
                 self._settings_dock.raise_()
                 return
@@ -435,7 +444,7 @@ satellite observations.</p>
 
         try:
             dialog = UpdateCheckerDialog(self.plugin_dir, self.iface.mainWindow())
-            dialog.exec_()
+            dialog.exec()
         except Exception as e:
             QMessageBox.critical(
                 self.iface.mainWindow(),
