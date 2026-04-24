@@ -28,25 +28,14 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtGui import QFont
 
+from ..utils.net import require_https
+
 # GitHub URLs for the plugin
 GITHUB_REPO = "opengeos/qgis-nasa-opera-plugin"
 GITHUB_BRANCH = "main"
 PLUGIN_PATH = "nasa_opera"
 METADATA_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{PLUGIN_PATH}/metadata.txt"
 ZIP_URL = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
-
-
-def _require_https(url: str) -> None:
-    """Reject any URL that does not use the https scheme.
-
-    Args:
-        url: URL string to validate.
-
-    Raises:
-        ValueError: If the URL is not https.
-    """
-    if not url.lower().startswith("https://"):
-        raise ValueError(f"Refusing non-https URL: {url!r}")
 
 
 class VersionCheckWorker(QThread):
@@ -58,7 +47,7 @@ class VersionCheckWorker(QThread):
     def run(self):
         """Fetch the latest metadata from GitHub."""
         try:
-            _require_https(METADATA_URL)
+            require_https(METADATA_URL)
             with urlopen(METADATA_URL, timeout=15) as response:  # nosec B310
                 content = response.read().decode("utf-8")
 
@@ -115,12 +104,14 @@ class DownloadWorker(QThread):
             self.progress.emit(10, "Downloading plugin from GitHub...")
 
             def reporthook(block_num, block_size, total_size):
+                if self.isInterruptionRequested():
+                    raise InterruptedError("Download cancelled by user")
                 if total_size > 0:
                     downloaded = block_num * block_size
                     percent = min(int((downloaded / total_size) * 50), 50)
                     self.progress.emit(10 + percent, "Downloading...")
 
-            _require_https(ZIP_URL)
+            require_https(ZIP_URL)
             urlretrieve(ZIP_URL, zip_path, reporthook)  # nosec B310
 
             self.progress.emit(60, "Extracting files...")
@@ -495,10 +486,14 @@ class UpdateCheckerDialog(QDialog):
 
     def closeEvent(self, event):
         """Handle dialog close event."""
-        # Stop any running workers
+        # Stop any running workers cooperatively. terminate() can leave
+        # locks/files in an undefined state, so request interruption and
+        # wait for the worker to exit on its own. The check worker has a
+        # 15-second urlopen timeout; the download worker checks
+        # isInterruptionRequested() in its progress reporthook.
         if self.check_worker and self.check_worker.isRunning():
-            self.check_worker.terminate()
-            self.check_worker.wait()
+            self.check_worker.requestInterruption()
+            self.check_worker.wait(20000)
 
         if self.download_worker and self.download_worker.isRunning():
             reply = QMessageBox.question(
@@ -511,7 +506,7 @@ class UpdateCheckerDialog(QDialog):
             if reply != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-            self.download_worker.terminate()
-            self.download_worker.wait()
+            self.download_worker.requestInterruption()
+            self.download_worker.wait(30000)
 
         event.accept()

@@ -81,4 +81,15 @@ def _install_qgis_stub() -> None:
         setattr(qgis, name, stub)
 
 
-_install_qgis_stub()
+def _real_qgis_available() -> bool:
+    """Return True if the real ``qgis`` package can be imported."""
+    try:
+        import qgis  # noqa: F401
+        import qgis.PyQt  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+if not _real_qgis_available():
+    _install_qgis_stub()
