@@ -12,7 +12,7 @@ import importlib
 import os
 import platform
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 from typing import Callable, Dict, List, Optional, Tuple
@@ -394,8 +394,9 @@ def _verify_pip_and_return(python_path: str) -> str:
     env = _get_clean_env()
     kwargs = _get_subprocess_kwargs()
 
-    # Try ensurepip (may already be present from EnvBuilder)
-    subprocess.run(
+    # Try ensurepip (may already be present from EnvBuilder).
+    # python_path resolved by us; argv is a fixed list; shell=False (default).
+    subprocess.run(  # nosec B603
         [python_path, "-m", "ensurepip", "--upgrade"],
         capture_output=True,
         text=True,
@@ -405,7 +406,7 @@ def _verify_pip_and_return(python_path: str) -> str:
     )
 
     # Verify pip works
-    result = subprocess.run(
+    result = subprocess.run(  # nosec B603
         [python_path, "-m", "pip", "--version"],
         capture_output=True,
         text=True,
@@ -463,7 +464,7 @@ def create_venv(venv_dir: str) -> str:
         uv_path = get_uv_path()
         python_exe = _find_python_executable()
         cmd = [uv_path, "venv", "--python", python_exe, venv_dir]
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603
             cmd,
             capture_output=True,
             text=True,
@@ -481,7 +482,7 @@ def create_venv(venv_dir: str) -> str:
     subprocess_error = ""
 
     cmd = [python_exe, "-m", "venv", venv_dir]
-    result = subprocess.run(
+    result = subprocess.run(  # nosec B603
         cmd,
         capture_output=True,
         text=True,
@@ -507,7 +508,7 @@ def create_venv(venv_dir: str) -> str:
 
     # Strategy 3: Create venv without pip, then copy Python executable if needed
     try:
-        result2 = subprocess.run(
+        result2 = subprocess.run(  # nosec B603
             [python_exe, "-m", "venv", "--without-pip", venv_dir],
             capture_output=True,
             text=True,
@@ -520,8 +521,8 @@ def create_venv(venv_dir: str) -> str:
                 _try_copy_python_executable(venv_dir)
             if os.path.isfile(python_path):
                 return _verify_pip_and_return(python_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"NASA OPERA: venv strategy 3 failed: {exc}", file=sys.stderr)
 
     # All strategies failed
     details = [
@@ -594,7 +595,8 @@ def install_packages(
         installer = "uv" if use_uv else "pip"
         progress_callback(20, f"Installing ({installer}): {', '.join(packages)}...")
 
-    result = subprocess.run(
+    # cmd is built from controlled paths and an internal package list.
+    result = subprocess.run(  # nosec B603
         cmd,
         capture_output=True,
         text=True,
@@ -660,7 +662,7 @@ class DepsInstallWorker(QThread):
                 env = _get_clean_env()
                 kwargs = _get_subprocess_kwargs()
 
-                result = subprocess.run(
+                result = subprocess.run(  # nosec B603
                     [python_path, "-m", "pip", "--version"],
                     capture_output=True,
                     text=True,

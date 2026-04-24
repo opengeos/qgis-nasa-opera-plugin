@@ -40,7 +40,7 @@ def _is_dark_theme() -> bool:
         True if the application uses a dark theme.
     """
     palette = QApplication.instance().palette()
-    bg = palette.color(QPalette.Window)
+    bg = palette.color(QPalette.ColorRole.Window)
     # A window background with lightness below 128 is considered dark
     return bg.lightness() < 128
 
@@ -139,8 +139,8 @@ class ChatInputWidget(QPlainTextEdit):
         Args:
             event: The key event.
         """
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            if event.modifiers() & Qt.ShiftModifier:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 super().keyPressEvent(event)
             else:
                 self._send_callback()
@@ -167,7 +167,9 @@ class AIChatDockWidget(QDockWidget):
         self._agent = None
         self._tool_registry = None
 
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._colors = _theme_colors()
         self._setup_ui()
 
