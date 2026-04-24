@@ -19,6 +19,8 @@ from typing import Callable, Dict, Optional, Tuple
 from qgis.PyQt.QtCore import QSettings, QUrl
 from qgis.PyQt.QtGui import QDesktopServices
 
+from ..utils.net import require_https
+
 # OAuth configuration per provider
 # These endpoints should be updated when official OAuth endpoints are available
 OAUTH_CONFIG = {
@@ -37,17 +39,18 @@ OAUTH_CONFIG = {
 }
 
 
-def _require_https(url: str) -> None:
-    """Reject any URL that does not use the https scheme.
+def _validate_oauth_config() -> None:
+    """Validate configured OAuth endpoints.
 
-    Args:
-        url: URL string to validate.
-
-    Raises:
-        ValueError: If the URL is not https.
+    Ensures both authorization and token endpoints use HTTPS so the
+    authorization flow cannot be started with an insecure endpoint.
     """
-    if not url.lower().startswith("https://"):
-        raise ValueError(f"Refusing non-https URL: {url!r}")
+    for config in OAUTH_CONFIG.values():
+        require_https(config["auth_url"])
+        require_https(config["token_url"])
+
+
+_validate_oauth_config()
 
 
 def _generate_pkce_pair() -> Tuple[str, str]:
@@ -237,7 +240,7 @@ class OAuthFlow:
             }
         ).encode("utf-8")
 
-        _require_https(config["token_url"])
+        require_https(config["token_url"])
         req = urllib.request.Request(
             config["token_url"],
             data=data,
