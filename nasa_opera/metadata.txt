@@ -3,7 +3,7 @@ name=NASA OPERA
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Search and visualize NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products.
-version=0.8.0
+version=0.8.2
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -47,6 +47,10 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.8.2
+        - Revert AI model list update (Gemini Test Connection 404 regression in 0.8.1)
+    0.8.1
+        - Update AI models in README and LLM client
     0.8.0
         - Compatible with QGIS 4.0 (Qt6) while still supporting QGIS 3.28+ (Qt5)
     0.7.0
