@@ -13,24 +13,20 @@ DEFAULT_MODELS = {
     "openai": "gpt-4.1",
     "anthropic": "claude-sonnet-4-6",
     "bedrock": "anthropic.claude-sonnet-4-20250514-v1:0",
-    "gemini": "gemini-2.5-flash",
-    "ollama": "llama3.3",
+    "gemini": "gemini-3.1-flash-lite-preview",
+    "ollama": "llama3.1",
 }
 
 # Available models per provider
 AVAILABLE_MODELS = {
     "openai": [
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4.1-nano",
-        "o4-mini",
-        "o3-mini",
-        "gpt-4o",
-        "gpt-4o-mini",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
     ],
     "anthropic": [
         "claude-sonnet-4-6",
-        "claude-opus-4-6",
+        "claude-opus-4-7",
         "claude-haiku-4-5-20251001",
     ],
     "bedrock": [
@@ -39,12 +35,12 @@ AVAILABLE_MODELS = {
         "anthropic.claude-haiku-4-5-20251001-v1:0",
     ],
     "gemini": [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3.1-pro-preview",
+        "gemini-3-flash-preview",
     ],
     "ollama": [
-        "llama3.3",
+        "llama3.1",
         "qwen3",
         "gemma3",
         "deepseek-r1",
