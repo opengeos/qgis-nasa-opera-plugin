@@ -138,11 +138,11 @@ The AI assistant can search data, display footprints, load rasters, create mosai
 
 | Provider | Default Model | API Key Required |
 |----------|--------------|-----------------|
-| OpenAI | gpt-5.5 | Yes |
+| OpenAI | gpt-4.1 | Yes |
 | Anthropic | claude-sonnet-4-6 | Yes |
 | Amazon Bedrock | claude-sonnet-4-20250514 | AWS credentials |
-| Google Gemini | gemini-3.1-flash-lite-preview | Yes |
-| Ollama | llama3.1 | No (local) |
+| Google Gemini | gemini-2.5-flash | Yes |
+| Ollama | llama3.3 | No (local) |
 
 ### Settings
 
