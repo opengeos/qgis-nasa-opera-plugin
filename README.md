@@ -50,7 +50,8 @@ The plugin manages dependencies automatically via an isolated virtual environmen
 
 For the AI Assistant, open **Settings > AI Assistant** and click **Install AI Dependencies** to install:
 
-- `litellm` - Unified LLM interface for multiple providers
+- `GeoAgent[providers,nasa-opera]` - GeoAgent tools and model providers
+- Provider clients for OpenAI, Anthropic, Gemini, and Ollama
 
 ## Installation
 
@@ -117,9 +118,9 @@ For the AI Assistant, open **Settings > AI Assistant** and click **Install AI De
 The AI Assistant lets you interact with NASA OPERA data using natural language.
 
 1. **Setup**: Go to **NASA OPERA > Settings > AI Assistant** tab
-   - Install AI dependencies (litellm)
+   - Install AI dependencies
    - Select your LLM provider (OpenAI, Anthropic, Bedrock, Gemini, or Ollama)
-   - Enter your API key (not required for Ollama)
+   - Enter the provider credentials or host settings
    - Click "Test Connection" to verify
 
 2. **Open**: Click the AI Assistant icon in the toolbar or go to **NASA OPERA > AI Assistant**
@@ -142,7 +143,7 @@ The AI assistant can search data, display footprints, load rasters, create mosai
 | Anthropic | claude-sonnet-4-6 | Yes |
 | Amazon Bedrock | claude-sonnet-4-20250514 | AWS credentials |
 | Google Gemini | gemini-3.1-flash-lite-preview | Yes |
-| Ollama | llama3.1 | No (local) |
+| Ollama | qwen3.5:4b | No (local) |
 
 ### Settings
 
@@ -176,10 +177,11 @@ qgis-nasa-opera-plugin/
 │   ├── uv_manager.py          # uv package installer
 │   ├── ai/                    # AI agent module
 │   │   ├── __init__.py
-│   │   ├── llm_client.py      # litellm wrapper (multi-provider)
-│   │   ├── agent.py           # Agent loop orchestration
-│   │   ├── tools.py           # Tool registry + 10 core tools
-│   │   ├── workers.py         # QThread worker for async LLM calls
+│   │   ├── model_config.py    # GeoAgent provider/model settings
+│   │   ├── llm_client.py      # Compatibility exports
+│   │   ├── agent.py           # Legacy agent loop
+│   │   ├── tools.py           # GeoAgent-backed tool registry
+│   │   ├── workers.py         # Legacy QThread worker
 │   │   └── oauth.py           # OAuth PKCE flow
 │   ├── dialogs/               # UI widgets
 │   │   ├── opera_dock.py      # Main search interface
@@ -225,7 +227,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [NASA OPERA Project](https://www.jpl.nasa.gov/go/opera) for providing the data products
 - [earthaccess](https://github.com/nsidc/earthaccess) for NASA Earthdata access
-- [litellm](https://github.com/BerriAI/litellm) for unified LLM provider access
+- [GeoAgent](https://github.com/opengeos/GeoAgent) for geospatial agent tools and model providers
 - [leafmap](https://github.com/opengeos/leafmap) for inspiration on the GUI design
 - The QGIS community for the excellent GIS platform
 
