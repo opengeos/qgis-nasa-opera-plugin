@@ -32,6 +32,27 @@ def _parameters_from_tool(tool: Any) -> Dict[str, Any]:
     return schema
 
 
+def _bbox_string_to_zoom_args(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert the legacy ``bbox`` string to ``zoom_to_extent`` arguments."""
+    bbox_str = str(kwargs.get("bbox", "")).strip()
+    if not bbox_str:
+        raise ValueError("bbox is required: 'west,south,east,north'")
+    try:
+        parts = [float(x.strip()) for x in bbox_str.split(",")]
+    except ValueError as exc:
+        raise ValueError(f"Invalid bbox format: '{bbox_str}'") from exc
+    if len(parts) != 4:
+        raise ValueError("bbox must have exactly 4 values: west,south,east,north")
+    west, south, east, north = parts
+    return {
+        "west": west,
+        "south": south,
+        "east": east,
+        "north": north,
+        "crs": "EPSG:4326",
+    }
+
+
 class BaseTool:
     """Small compatibility base class for plugin tool registries."""
 
@@ -184,7 +205,15 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
-        """Return OpenAI function-calling schemas for all tools."""
+        """Return OpenAI function-calling schemas for all tools.
+
+        If the registry was created without an ``iface`` (and tools have not
+        been loaded yet), this triggers a load attempt so callers that need
+        schemas up front, such as the legacy ``OperaAgent`` loop, do not see
+        an empty registry.
+        """
+        if not self._tools and self._iface is not None:
+            self._load_geoagent_tools(self._iface, self._project)
         return [
             {
                 "type": "function",
@@ -202,6 +231,9 @@ class ToolRegistry:
     ) -> Dict[str, Any]:
         """Execute a tool by name."""
         if not self._tools and iface is not None:
+            # Allow recovery when GeoAgent was installed mid-session: clear
+            # any prior load error and retry the import/load step.
+            self._load_error = None
             self._load_geoagent_tools(iface, self._project)
 
         if self._load_error:
@@ -260,22 +292,27 @@ class ToolRegistry:
             self.register(
                 AliasTool(
                     name="set_map_extent",
-                    description="Set the QGIS map extent to a bounding box.",
+                    description=(
+                        "Pan and zoom the QGIS map to a specific geographic "
+                        "bounding box. Coordinates should be in decimal degrees "
+                        "(WGS84)."
+                    ),
                     parameters={
                         "type": "object",
                         "properties": {
-                            "west": {"type": "number"},
-                            "south": {"type": "number"},
-                            "east": {"type": "number"},
-                            "north": {"type": "number"},
-                            "crs": {
+                            "bbox": {
                                 "type": "string",
-                                "description": "Input CRS, default EPSG:4326.",
+                                "description": (
+                                    "Bounding box as 'west,south,east,north' in "
+                                    "decimal degrees. E.g., "
+                                    "'-95.5,29.5,-95.0,30.0'."
+                                ),
                             },
                         },
-                        "required": ["west", "south", "east", "north"],
+                        "required": ["bbox"],
                     },
                     target=zoom_to_extent,
+                    argument_adapter=_bbox_string_to_zoom_args,
                     result_adapter=lambda result: {"success": True, "message": result},
                 )
             )

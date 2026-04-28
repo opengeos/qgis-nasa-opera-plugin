@@ -41,9 +41,15 @@ SUGGESTED_PROMPTS = [
 
 
 class GeoAgentOperaWorker(QThread):
-    """Run GeoAgent NASA OPERA chat without blocking the QGIS UI."""
+    """Run GeoAgent NASA OPERA chat without blocking the QGIS UI.
 
-    text_chunk = pyqtSignal(str)
+    GeoAgent's NASA OPERA and QGIS tools wrap their QGIS/PyQt operations in
+    ``run_on_qt_gui_thread`` (``QMetaObject.invokeMethod`` with
+    ``BlockingQueuedConnection``), so executing ``agent.chat()`` from this
+    worker thread is the supported pattern: tool work that touches QGIS
+    objects is marshalled back to the GUI thread automatically.
+    """
+
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
@@ -68,10 +74,20 @@ class GeoAgentOperaWorker(QThread):
         self.max_tokens = max_tokens
         self.agent = agent
 
+    def _confirm_unless_interrupted(self, request):
+        """Confirm tool execution unless the worker was asked to stop.
+
+        Returning ``False`` cancels the upcoming tool call; GeoAgent treats a
+        cancelled tool as a stop reason and ends the chat loop, which gives
+        the Stop button a clean way to abort an in-flight request without
+        killing the underlying network or model call mid-stream.
+        """
+        return not self.isInterruptionRequested()
+
     def run(self):
         """Create a GeoAgent NASA OPERA agent and execute one chat turn."""
         try:
-            from geoagent import GeoAgentConfig, auto_approve_all, for_nasa_opera
+            from geoagent import GeoAgentConfig, for_nasa_opera
 
             agent = self.agent
             if agent is None:
@@ -85,7 +101,7 @@ class GeoAgentOperaWorker(QThread):
                     project=None,
                     config=config,
                     fast=self.fast,
-                    confirm=auto_approve_all,
+                    confirm=self._confirm_unless_interrupted,
                 )
             response = agent.chat(self.prompt)
             self.finished.emit(
@@ -97,6 +113,7 @@ class GeoAgentOperaWorker(QThread):
                     "cancelled": ", ".join(response.cancelled_tools or []),
                     "elapsed": f"{response.execution_time:.2f}s",
                     "agent": agent,
+                    "interrupted": self.isInterruptionRequested(),
                 }
             )
         except Exception as exc:
@@ -715,10 +732,18 @@ class AIChatDockWidget(QDockWidget):
 
     def _on_stop(self):
         """Handle stop button click."""
-        if self._worker:
-            self._worker.requestInterruption()
+        worker = self._worker
+        if worker is not None:
+            # Ask the worker's confirm callback to reject the next tool call,
+            # which lets GeoAgent end the chat loop cleanly instead of leaving
+            # the QThread running with no way to cancel.
+            worker.requestInterruption()
+            # Late signals from this worker are now stale; drop them in the
+            # finished/error handlers.
+            worker._discarded = True
+            self._worker = None
         self._reset_input_state()
-        self.status_label.setText("Cancelled")
+        self.status_label.setText("Cancelling...")
         self.status_label.setStyleSheet(
             f"color: {self._colors['error_color']}; font-size: 10px;"
         )
@@ -737,14 +762,6 @@ class AIChatDockWidget(QDockWidget):
         self.status_label.setStyleSheet(
             f"color: {self._colors['text_secondary']}; font-size: 10px;"
         )
-
-    def _on_text_chunk(self, chunk: str):
-        """Handle streaming text from the agent.
-
-        Args:
-            chunk: Text chunk from the LLM.
-        """
-        self._append_assistant_message(chunk)
 
     def _on_tool_call_started(self, tool_name: str, args_json: str):
         """Handle tool call start notification.
@@ -821,7 +838,23 @@ class AIChatDockWidget(QDockWidget):
         Args:
             result: Worker result payload.
         """
+        sender = self.sender()
+        if getattr(sender, "_discarded", False) or (
+            self._worker is not None and sender is not self._worker
+        ):
+            # The user pressed Stop or started a newer turn before this one
+            # arrived; ignore late signals from the stale worker.
+            return
         self._agent = result.get("agent") or self._agent
+        if result.get("interrupted"):
+            self._append_error_message("Cancelled by user.")
+            self._reset_input_state()
+            self.status_label.setText("Cancelled")
+            self.status_label.setStyleSheet(
+                f"color: {self._colors['error_color']}; font-size: 10px;"
+            )
+            self._worker = None
+            return
         if result.get("success"):
             answer = result.get("answer") or "(No text response.)"
             details = []
@@ -859,6 +892,11 @@ class AIChatDockWidget(QDockWidget):
         Args:
             error_msg: Error message.
         """
+        sender = self.sender()
+        if getattr(sender, "_discarded", False) or (
+            self._worker is not None and sender is not self._worker
+        ):
+            return
         self._append_error_message(error_msg)
         self._reset_input_state()
         self.status_label.setText("Error occurred")

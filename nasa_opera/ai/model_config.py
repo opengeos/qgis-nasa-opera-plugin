@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 SETTINGS_PREFIX = "NasaOpera/"
 
@@ -71,7 +72,7 @@ def provider_from_settings(settings) -> str:
     return normalize_provider(setting(settings, "ai_provider", "openai"))
 
 
-def model_from_settings(settings, provider: str | None = None) -> str:
+def model_from_settings(settings, provider: Optional[str] = None) -> str:
     """Read the selected model, falling back to the provider default."""
     provider = provider or provider_from_settings(settings)
     model = setting(settings, "ai_model", "")
@@ -79,7 +80,11 @@ def model_from_settings(settings, provider: str | None = None) -> str:
 
 
 def apply_environment_from_settings(settings) -> None:
-    """Apply provider credentials from QSettings to the current QGIS process."""
+    """Apply provider credentials from QSettings to the current QGIS process.
+
+    Empty settings explicitly clear the corresponding environment variables
+    so that stale credentials from a previous configuration are not reused.
+    """
     provider = provider_from_settings(settings)
     legacy_key = setting(settings, "ai_api_key", "").strip()
     legacy_base_url = setting(settings, "ai_base_url", "").strip()
@@ -91,19 +96,27 @@ def apply_environment_from_settings(settings) -> None:
         "ai_aws_region": ("AWS_REGION",),
         "ai_ollama_host": ("OLLAMA_HOST",),
     }
+    legacy_fallback = {
+        "openai": ("OPENAI_API_KEY",),
+        "anthropic": ("ANTHROPIC_API_KEY",),
+        "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    }.get(provider, ())
+
     for key, env_names in env_map.items():
         value = setting(settings, key, "").strip()
-        if value:
-            for env_name in env_names:
+        for env_name in env_names:
+            if value:
                 os.environ[env_name] = value
+            elif env_name in legacy_fallback and legacy_key:
+                # Let the legacy key fall back below.
+                continue
+            elif env_name == "OLLAMA_HOST" and legacy_base_url:
+                continue
+            else:
+                os.environ.pop(env_name, None)
 
     if legacy_key:
-        fallback_env = {
-            "openai": ("OPENAI_API_KEY",),
-            "anthropic": ("ANTHROPIC_API_KEY",),
-            "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-        }.get(provider, ())
-        for env_name in fallback_env:
+        for env_name in legacy_fallback:
             os.environ.setdefault(env_name, legacy_key)
 
     if legacy_base_url:
