@@ -274,7 +274,7 @@ class NasaOpera:
                     reply = QMessageBox.warning(
                         self.iface.mainWindow(),
                         "AI Dependencies Missing",
-                        "The AI Assistant requires the litellm package.\n\n"
+                        "The AI Assistant requires GeoAgent provider packages.\n\n"
                         "Would you like to open Settings to install it?",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         QMessageBox.StandardButton.Yes,

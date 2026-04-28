@@ -6,9 +6,8 @@ Handles multi-turn tool calling, streaming responses, and conversation history.
 """
 
 import json
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from .llm_client import LLMClient
 from .tools import ToolRegistry
 
 # System prompt providing OPERA domain knowledge and tool usage instructions
@@ -63,7 +62,7 @@ class OperaAgent:
 
     def __init__(
         self,
-        llm_client: LLMClient,
+        llm_client: Any,
         tool_registry: ToolRegistry,
         iface,
     ):

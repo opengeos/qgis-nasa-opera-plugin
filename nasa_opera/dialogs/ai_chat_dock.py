@@ -7,11 +7,18 @@ using natural language powered by LLM providers.
 
 import json
 import re
+import html
+import time
+import traceback
 
-from qgis.PyQt.QtCore import Qt, QSettings
+from qgis.PyQt.QtCore import Qt, QSettings, QThread, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QFormLayout,
+    QGroupBox,
     QDockWidget,
+    QLineEdit,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -23,7 +30,7 @@ from qgis.PyQt.QtWidgets import (
     QSizePolicy,
     QMessageBox,
 )
-from qgis.PyQt.QtGui import QFont, QTextCursor, QKeyEvent, QPalette
+from qgis.PyQt.QtGui import QFont, QGuiApplication, QTextCursor, QKeyEvent, QPalette
 
 SUGGESTED_PROMPTS = [
     "What OPERA datasets are available?",
@@ -31,6 +38,242 @@ SUGGESTED_PROMPTS = [
     "Find land disturbance alerts in California from 2024",
     "Show me the latest DSWX-HLS data for Las Vegas area",
 ]
+
+
+class GeoAgentOperaWorker(QThread):
+    """Run GeoAgent NASA OPERA chat without blocking the QGIS UI.
+
+    GeoAgent's NASA OPERA and QGIS tools wrap their QGIS/PyQt operations in
+    ``run_on_qt_gui_thread`` (``QMetaObject.invokeMethod`` with
+    ``BlockingQueuedConnection``), so executing ``agent.chat()`` from this
+    worker thread is the supported pattern: tool work that touches QGIS
+    objects is marshalled back to the GUI thread automatically.
+    """
+
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        iface,
+        prompt,
+        provider,
+        model_id,
+        fast,
+        max_tokens,
+        agent=None,
+        parent=None,
+    ):
+        """Initialize the worker."""
+        super().__init__(parent)
+        self.iface = iface
+        self.prompt = prompt
+        self.provider = provider
+        self.model_id = model_id or None
+        self.fast = fast
+        self.max_tokens = max_tokens
+        self.agent = agent
+
+    def _confirm_unless_interrupted(self, request):
+        """Confirm tool execution unless the worker was asked to stop.
+
+        Returning ``False`` cancels the upcoming tool call; GeoAgent treats a
+        cancelled tool as a stop reason and ends the chat loop, which gives
+        the Stop button a clean way to abort an in-flight request without
+        killing the underlying network or model call mid-stream.
+        """
+        return not self.isInterruptionRequested()
+
+    def run(self):
+        """Create a GeoAgent NASA OPERA agent and execute one chat turn."""
+        try:
+            from geoagent import GeoAgentConfig, for_nasa_opera
+
+            agent = self.agent
+            if agent is None:
+                config = GeoAgentConfig(
+                    provider=self.provider,
+                    model=self.model_id,
+                    max_tokens=self.max_tokens,
+                )
+                agent = for_nasa_opera(
+                    self.iface,
+                    project=None,
+                    config=config,
+                    fast=self.fast,
+                    confirm=self._confirm_unless_interrupted,
+                )
+            response = agent.chat(self.prompt)
+            self.finished.emit(
+                {
+                    "success": bool(response.success),
+                    "answer": response.answer_text or "",
+                    "error": response.error_message or "",
+                    "tools": ", ".join(response.executed_tools or []),
+                    "cancelled": ", ".join(response.cancelled_tools or []),
+                    "elapsed": f"{response.execution_time:.2f}s",
+                    "agent": agent,
+                    "interrupted": self.isInterruptionRequested(),
+                }
+            )
+        except Exception as exc:
+            self.error.emit(f"{exc}\n\n{traceback.format_exc()}")
+
+
+def _plain_text_to_html(text: str) -> str:
+    """Convert plain text to basic HTML."""
+    return html.escape(text).replace("\n", "<br>")
+
+
+def _inline_markdown_to_html(text: str) -> str:
+    """Convert inline Markdown spans to HTML."""
+    text = html.escape(text)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", text)
+    return text
+
+
+def _is_markdown_table(lines: list[str], index: int) -> bool:
+    """Return True if lines at index start a simple Markdown table."""
+    if index + 1 >= len(lines):
+        return False
+    header = lines[index].strip()
+    separator = lines[index + 1].strip()
+    if "|" not in header or "|" not in separator:
+        return False
+    separator_cells = [cell.strip() for cell in separator.strip("|").split("|")]
+    return bool(separator_cells) and all(
+        re.match(r"^:?-{3,}:?$", cell) for cell in separator_cells
+    )
+
+
+def _table_to_html(table_lines: list[str]) -> str:
+    """Convert a simple Markdown pipe table to HTML."""
+    rows = [
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in table_lines
+    ]
+    if len(rows) < 2:
+        return ""
+    header = rows[0]
+    body = rows[2:]
+    header_html = "".join(
+        f"<th>{_inline_markdown_to_html(cell)}</th>" for cell in header
+    )
+    body_rows = []
+    for row in body:
+        cells = "".join(f"<td>{_inline_markdown_to_html(cell)}</td>" for cell in row)
+        body_rows.append(f"<tr>{cells}</tr>")
+    return (
+        "<table style='border-collapse: collapse; width: 100%; margin: 6px 0;'>"
+        f"<thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table>"
+    )
+
+
+def _markdown_to_basic_html(markdown: str) -> str:
+    """Render common Markdown to HTML for QTextBrowser."""
+    lines = markdown.splitlines()
+    html_lines: list[str] = []
+    in_ul = False
+    in_ol = False
+    in_code = False
+    code_lines: list[str] = []
+    i = 0
+
+    def close_lists() -> None:
+        nonlocal in_ul, in_ol
+        if in_ul:
+            html_lines.append("</ul>")
+            in_ul = False
+        if in_ol:
+            html_lines.append("</ol>")
+            in_ol = False
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            if in_code:
+                html_lines.append(
+                    f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>"
+                )
+                code_lines = []
+                in_code = False
+            else:
+                close_lists()
+                in_code = True
+            i += 1
+            continue
+
+        if in_code:
+            code_lines.append(line)
+            i += 1
+            continue
+
+        if _is_markdown_table(lines, i):
+            close_lists()
+            table_lines = [lines[i], lines[i + 1]]
+            i += 2
+            while i < len(lines) and "|" in lines[i]:
+                table_lines.append(lines[i])
+                i += 1
+            html_lines.append(_table_to_html(table_lines))
+            continue
+
+        if not stripped:
+            close_lists()
+            html_lines.append("")
+            i += 1
+            continue
+
+        heading = re.match(r"^(#{1,3})\s+(.+)$", stripped)
+        if heading:
+            close_lists()
+            level = len(heading.group(1))
+            html_lines.append(
+                f"<h{level}>{_inline_markdown_to_html(heading.group(2))}</h{level}>"
+            )
+            i += 1
+            continue
+
+        bullet = re.match(r"^[-*]\s+(.+)$", stripped)
+        if bullet:
+            if in_ol:
+                html_lines.append("</ol>")
+                in_ol = False
+            if not in_ul:
+                html_lines.append("<ul>")
+                in_ul = True
+            html_lines.append(f"<li>{_inline_markdown_to_html(bullet.group(1))}</li>")
+            i += 1
+            continue
+
+        numbered = re.match(r"^\d+\.\s+(.+)$", stripped)
+        if numbered:
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            if not in_ol:
+                html_lines.append("<ol>")
+                in_ol = True
+            html_lines.append(f"<li>{_inline_markdown_to_html(numbered.group(1))}</li>")
+            i += 1
+            continue
+
+        close_lists()
+        html_lines.append(f"<p>{_inline_markdown_to_html(stripped)}</p>")
+        i += 1
+
+    if in_code:
+        html_lines.append(
+            f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>"
+        )
+    close_lists()
+    return "\n".join(html_lines)
 
 
 def _is_dark_theme() -> bool:
@@ -165,13 +408,22 @@ class AIChatDockWidget(QDockWidget):
         self.settings = QSettings()
         self._worker = None
         self._agent = None
-        self._tool_registry = None
+        self._agent_settings_key = None
+        self._messages = []
+        self._last_assistant_markdown = ""
+        self._status_started_at = None
+        self._status_base_text = "Thinking"
+        self._status_frame = 0
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(500)
+        self._status_timer.timeout.connect(self._update_running_status)
 
         self.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
         self._colors = _theme_colors()
         self._setup_ui()
+        self._load_model_settings()
 
     def _setup_ui(self):
         """Set up the chat UI."""
@@ -204,6 +456,26 @@ class AIChatDockWidget(QDockWidget):
         header_layout.addWidget(self.provider_label)
 
         layout.addLayout(header_layout)
+
+        # Model controls match qgis_geoagent's provider selection pattern.
+        from ..ai.model_config import PROVIDERS
+
+        model_group = QGroupBox("Model")
+        model_layout = QFormLayout(model_group)
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(PROVIDERS)
+        self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
+        model_layout.addRow("Provider:", self.provider_combo)
+
+        self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("Use provider default")
+        model_layout.addRow("Model:", self.model_input)
+
+        self.fast_check = QCheckBox("Fast mode")
+        model_layout.addRow("", self.fast_check)
+
+        layout.addWidget(model_group)
 
         # Chat display
         self.chat_display = QTextBrowser()
@@ -314,6 +586,12 @@ class AIChatDockWidget(QDockWidget):
         self.clear_btn.clicked.connect(self._on_clear)
         bottom_layout.addWidget(self.clear_btn)
 
+        self.copy_md_btn = QPushButton("Copy Markdown")
+        self.copy_md_btn.setStyleSheet("font-size: 10px; padding: 3px 8px;")
+        self.copy_md_btn.setEnabled(False)
+        self.copy_md_btn.clicked.connect(self._copy_latest_markdown)
+        bottom_layout.addWidget(self.copy_md_btn)
+
         bottom_layout.addStretch()
 
         layout.addLayout(bottom_layout)
@@ -323,10 +601,14 @@ class AIChatDockWidget(QDockWidget):
 
     def _update_provider_label(self):
         """Update the provider/model display label."""
-        provider = self.settings.value(
-            f"{self.SETTINGS_PREFIX}ai_provider", "", type=str
-        )
-        model = self.settings.value(f"{self.SETTINGS_PREFIX}ai_model", "", type=str)
+        if hasattr(self, "provider_combo") and hasattr(self, "model_input"):
+            provider = self.provider_combo.currentText()
+            model = self.model_input.text().strip()
+        else:
+            from ..ai.model_config import model_from_settings, provider_from_settings
+
+            provider = provider_from_settings(self.settings)
+            model = model_from_settings(self.settings, provider)
         if provider and model:
             self.provider_label.setText(f"{provider}/{model}")
         elif provider:
@@ -334,82 +616,57 @@ class AIChatDockWidget(QDockWidget):
         else:
             self.provider_label.setText("Not configured")
 
-    def _ensure_agent(self) -> bool:
-        """Ensure the agent is initialized with current settings.
+    def _load_model_settings(self):
+        """Load persisted model settings into the dock controls."""
+        from ..ai.model_config import DEFAULT_MODELS, provider_from_settings, setting
 
-        Only recreates the agent if settings have changed or no agent exists.
-        Preserves conversation history across setting changes.
+        provider = provider_from_settings(self.settings)
+        index = self.provider_combo.findText(provider)
+        self.provider_combo.setCurrentIndex(index if index >= 0 else 1)
+
+        model = setting(self.settings, "ai_model", "")
+        self.model_input.setText(model or DEFAULT_MODELS.get(provider, ""))
+        self.fast_check.setChecked(setting(self.settings, "ai_fast_mode", False, bool))
+        self._update_provider_label()
+
+    def _save_model_settings(self):
+        """Persist the selected provider, model, and fast-mode setting."""
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}ai_provider", self.provider_combo.currentText()
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}ai_model", self.model_input.text()
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}ai_fast_mode", self.fast_check.isChecked()
+        )
+
+    def _on_provider_changed(self, provider):
+        """Update the model field when provider changes."""
+        from ..ai.model_config import DEFAULT_MODELS
+
+        self.model_input.setText(DEFAULT_MODELS.get(provider, ""))
+        self._agent = None
+        self._agent_settings_key = None
+        self._update_provider_label()
+
+    def _ensure_agent(self) -> bool:
+        """Ensure GeoAgent and provider dependencies are importable.
 
         Returns:
-            True if agent is ready, False if configuration is missing.
+            True if the assistant can start, False otherwise.
         """
-        provider = self.settings.value(
-            f"{self.SETTINGS_PREFIX}ai_provider", "", type=str
-        )
-        if not provider:
+        try:
+            from geoagent import GeoAgentConfig, for_nasa_opera  # noqa: F401
+        except Exception as exc:
             QMessageBox.warning(
                 self,
-                "AI Not Configured",
-                "Please configure your LLM provider in\n"
-                "Settings > AI Assistant tab.",
+                "GeoAgent Not Available",
+                "The AI Assistant requires GeoAgent provider dependencies.\n\n"
+                f"{exc}\n\nOpen Settings > AI Assistant to install dependencies.",
             )
             return False
 
-        model = self.settings.value(f"{self.SETTINGS_PREFIX}ai_model", "", type=str)
-        api_key = self.settings.value(f"{self.SETTINGS_PREFIX}ai_api_key", "", type=str)
-        base_url = self.settings.value(
-            f"{self.SETTINGS_PREFIX}ai_base_url", "", type=str
-        )
-        temperature_pct = self.settings.value(
-            f"{self.SETTINGS_PREFIX}ai_temperature", 30, type=int
-        )
-        temperature = temperature_pct / 100.0
-        max_tokens = self.settings.value(
-            f"{self.SETTINGS_PREFIX}ai_max_tokens", 4096, type=int
-        )
-
-        # Ollama doesn't need an API key
-        if provider.lower() != "ollama" and not api_key:
-            QMessageBox.warning(
-                self,
-                "API Key Missing",
-                f"Please enter your {provider} API key in\n"
-                "Settings > AI Assistant tab.",
-            )
-            return False
-
-        # Check if settings changed -- skip recreation if unchanged
-        settings_key = (provider, model, api_key, base_url, temperature, max_tokens)
-        if (
-            self._agent is not None
-            and hasattr(self, "_last_settings_key")
-            and self._last_settings_key == settings_key
-        ):
-            return True
-
-        from ..ai.llm_client import LLMClient, DEFAULT_MODELS
-        from ..ai.tools import create_default_registry
-        from ..ai.agent import OperaAgent
-
-        if not model:
-            model = DEFAULT_MODELS.get(provider.lower(), "")
-
-        client = LLMClient(
-            provider=provider,
-            model=model,
-            api_key=api_key if api_key else None,
-            base_url=base_url if base_url else None,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-        # Preserve conversation history if agent existed
-        old_history = self._agent.history if self._agent else []
-
-        self._tool_registry = create_default_registry()
-        self._agent = OperaAgent(client, self._tool_registry, self.iface)
-        self._agent.history = old_history
-        self._last_settings_key = settings_key
         self._update_provider_label()
         return True
 
@@ -431,9 +688,6 @@ class AIChatDockWidget(QDockWidget):
         if not self._ensure_agent():
             return
 
-        # Capture map state on main thread before entering worker
-        self._agent.capture_map_state()
-
         # Hide suggestions after first message
         self.suggestions_widget.setVisible(False)
 
@@ -446,29 +700,50 @@ class AIChatDockWidget(QDockWidget):
         self.send_btn.setEnabled(False)
         self.stop_btn.setVisible(True)
         self.chat_input.setEnabled(False)
-        self.status_label.setText("Thinking...")
         self.status_label.setStyleSheet(f"color: {c['accent']}; font-size: 10px;")
+        self._start_running_status("Thinking")
 
-        # Start agent worker
-        from ..ai.workers import AgentWorker
+        from ..ai.model_config import apply_environment_from_settings, setting
 
-        self._worker = AgentWorker(self._agent, message)
-        self._worker.text_chunk.connect(self._on_text_chunk)
-        self._worker.tool_call_started.connect(self._on_tool_call_started)
-        self._worker.tool_call_result.connect(self._on_tool_call_result)
-        self._worker.execute_tool_request.connect(self._on_execute_tool_request)
-        self._worker.finished.connect(self._on_finished)
+        self._save_model_settings()
+        apply_environment_from_settings(self.settings)
+        provider = self.provider_combo.currentText()
+        model_id = self.model_input.text().strip()
+        fast = self.fast_check.isChecked()
+        max_tokens = setting(self.settings, "ai_max_tokens", 4096, int)
+        settings_key = (provider, model_id, fast, max_tokens)
+        if self._agent_settings_key != settings_key:
+            self._agent = None
+            self._agent_settings_key = settings_key
+
+        self._worker = GeoAgentOperaWorker(
+            self.iface,
+            message,
+            provider,
+            model_id,
+            fast,
+            max_tokens,
+            self._agent,
+            self,
+        )
         self._worker.error.connect(self._on_error)
+        self._worker.finished.connect(self._on_finished)
         self._worker.start()
 
     def _on_stop(self):
         """Handle stop button click."""
-        if self._worker:
-            self._worker.cancel()
-            # Unblock worker if waiting for tool result
-            self._worker.provide_tool_result({"error": "Operation cancelled by user."})
+        worker = self._worker
+        if worker is not None:
+            # Ask the worker's confirm callback to reject the next tool call,
+            # which lets GeoAgent end the chat loop cleanly instead of leaving
+            # the QThread running with no way to cancel.
+            worker.requestInterruption()
+            # Late signals from this worker are now stale; drop them in the
+            # finished/error handlers.
+            worker._discarded = True
+            self._worker = None
         self._reset_input_state()
-        self.status_label.setText("Cancelled")
+        self.status_label.setText("Cancelling...")
         self.status_label.setStyleSheet(
             f"color: {self._colors['error_color']}; font-size: 10px;"
         )
@@ -476,22 +751,17 @@ class AIChatDockWidget(QDockWidget):
     def _on_clear(self):
         """Clear the chat history."""
         self._colors = _theme_colors()
-        self.chat_display.setHtml(_welcome_html(self._colors))
+        self._messages = []
+        self._last_assistant_markdown = ""
+        self._agent = None
+        self._agent_settings_key = None
+        self.copy_md_btn.setEnabled(False)
+        self._render_transcript()
         self.suggestions_widget.setVisible(True)
-        if self._agent:
-            self._agent.clear_history()
         self.status_label.setText("Chat cleared")
         self.status_label.setStyleSheet(
             f"color: {self._colors['text_secondary']}; font-size: 10px;"
         )
-
-    def _on_text_chunk(self, chunk: str):
-        """Handle streaming text from the agent.
-
-        Args:
-            chunk: Text chunk from the LLM.
-        """
-        self._append_assistant_message(chunk)
 
     def _on_tool_call_started(self, tool_name: str, args_json: str):
         """Handle tool call start notification.
@@ -521,7 +791,7 @@ class AIChatDockWidget(QDockWidget):
         self.chat_display.append(tool_html)
         self._scroll_to_bottom()
 
-        self.status_label.setText(f"Executing: {tool_name}...")
+        self._start_running_status(f"Executing: {tool_name}")
         self.status_label.setStyleSheet(f"color: {c['tool_color']}; font-size: 10px;")
 
     def _on_tool_call_result(self, tool_name: str, result_json: str):
@@ -562,34 +832,59 @@ class AIChatDockWidget(QDockWidget):
         self.chat_display.append(result_html)
         self._scroll_to_bottom()
 
-    def _on_execute_tool_request(self, tool_name: str, args_json: str):
-        """Execute a tool on the main thread (QGIS API safe).
-
-        Args:
-            tool_name: Name of the tool to execute.
-            args_json: JSON string of tool arguments.
-        """
-        try:
-            args = json.loads(args_json)
-        except json.JSONDecodeError:
-            args = {}
-
-        result = self._tool_registry.execute_tool(tool_name, args, self.iface)
-
-        if self._worker:
-            self._worker.provide_tool_result(result)
-
-    def _on_finished(self, response: str):
+    def _on_finished(self, result: dict):
         """Handle agent completion.
 
         Args:
-            response: The full response text.
+            result: Worker result payload.
         """
+        sender = self.sender()
+        if getattr(sender, "_discarded", False) or (
+            self._worker is not None and sender is not self._worker
+        ):
+            # The user pressed Stop or started a newer turn before this one
+            # arrived; ignore late signals from the stale worker.
+            return
+        self._agent = result.get("agent") or self._agent
+        if result.get("interrupted"):
+            self._append_error_message("Cancelled by user.")
+            self._reset_input_state()
+            self.status_label.setText("Cancelled")
+            self.status_label.setStyleSheet(
+                f"color: {self._colors['error_color']}; font-size: 10px;"
+            )
+            self._worker = None
+            return
+        if result.get("success"):
+            answer = result.get("answer") or "(No text response.)"
+            details = []
+            if result.get("tools"):
+                details.append(f"Tools: {result['tools']}")
+            if result.get("elapsed"):
+                details.append(f"Elapsed: {result['elapsed']}")
+            if details:
+                answer = f"{answer}\n\n" + "\n".join(details)
+            self._append_assistant_message(answer)
+        else:
+            error = result.get("error") or "Unknown error"
+            cancelled = result.get("cancelled")
+            if cancelled:
+                error = f"{error}\nCancelled tools: {cancelled}"
+            self._append_error_message(error)
+            self._reset_input_state()
+            self.status_label.setText("Error occurred")
+            self.status_label.setStyleSheet(
+                f"color: {self._colors['error_color']}; font-size: 10px;"
+            )
+            self._worker = None
+            return
+
         self._reset_input_state()
         self.status_label.setText("Ready")
         self.status_label.setStyleSheet(
             f"color: {self._colors['success']}; font-size: 10px;"
         )
+        self._worker = None
 
     def _on_error(self, error_msg: str):
         """Handle agent error.
@@ -597,20 +892,62 @@ class AIChatDockWidget(QDockWidget):
         Args:
             error_msg: Error message.
         """
+        sender = self.sender()
+        if getattr(sender, "_discarded", False) or (
+            self._worker is not None and sender is not self._worker
+        ):
+            return
         self._append_error_message(error_msg)
         self._reset_input_state()
         self.status_label.setText("Error occurred")
         self.status_label.setStyleSheet(
             f"color: {self._colors['error_color']}; font-size: 10px;"
         )
+        self._worker = None
 
     def _reset_input_state(self):
         """Re-enable input controls after processing."""
+        self._stop_running_status()
         self.send_btn.setEnabled(True)
         self.stop_btn.setVisible(False)
         self.chat_input.setEnabled(True)
         self.chat_input.setFocus()
         self._worker = None
+
+    def _start_running_status(self, base_text: str):
+        """Start or update the animated status text."""
+        self._status_base_text = base_text
+        if self._status_started_at is None:
+            self._status_started_at = time.monotonic()
+            self._status_frame = 0
+        if not self._status_timer.isActive():
+            self._status_timer.start()
+        self._update_running_status()
+
+    def _stop_running_status(self):
+        """Stop the animated status text."""
+        if self._status_timer.isActive():
+            self._status_timer.stop()
+        self._status_started_at = None
+        self._status_frame = 0
+
+    def _update_running_status(self):
+        """Refresh the animated status text."""
+        if self._status_started_at is None:
+            return
+        elapsed = int(time.monotonic() - self._status_started_at)
+        spinner = ("-", "\\", "|", "/")[self._status_frame % 4]
+        self._status_frame += 1
+        dots = "." * (self._status_frame % 4)
+        if elapsed >= 30:
+            suffix = "large OPERA rasters can take a while"
+        elif elapsed >= 10:
+            suffix = "running tools and waiting for the model"
+        else:
+            suffix = "working"
+        self.status_label.setText(
+            f"{spinner} {self._status_base_text}{dots} {elapsed}s - {suffix}"
+        )
 
     def _append_user_message(self, message: str):
         """Append a user message to the chat display.
@@ -618,20 +955,7 @@ class AIChatDockWidget(QDockWidget):
         Args:
             message: The user's message text.
         """
-        c = self._colors
-        escaped = (
-            message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        )
-        escaped = escaped.replace("\n", "<br>")
-        html = (
-            f'<div style="background-color: {c["bg_user"]}; '
-            f"border-radius: 8px; padding: 8px 12px; "
-            f'margin: 4px 20px 4px 60px; color: {c["text"]};">'
-            f'<b style="color: {c["user_label"]};">You</b><br>'
-            f"{escaped}</div>"
-        )
-        self.chat_display.append(html)
-        self._scroll_to_bottom()
+        self._append_message("You", message, markdown=False)
 
     def _append_assistant_message(self, message: str):
         """Append an assistant message to the chat display.
@@ -639,26 +963,7 @@ class AIChatDockWidget(QDockWidget):
         Args:
             message: The assistant's message text.
         """
-        c = self._colors
-        formatted = (
-            message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        )
-        formatted = formatted.replace("\n", "<br>")
-
-        # Bold
-        formatted = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", formatted)
-        # Inline code
-        formatted = re.sub(r"`(.+?)`", r"<code>\1</code>", formatted)
-
-        html = (
-            f'<div style="background-color: {c["bg_assistant"]}; '
-            f"border-radius: 8px; padding: 8px 12px; "
-            f'margin: 4px 60px 4px 0px; color: {c["text"]};">'
-            f'<b style="color: {c["assistant_label"]};">Assistant</b><br>'
-            f"{formatted}</div>"
-        )
-        self.chat_display.append(html)
-        self._scroll_to_bottom()
+        self._append_message("Assistant", message, markdown=True)
 
     def _append_error_message(self, message: str):
         """Append an error message to the chat display.
@@ -667,9 +972,7 @@ class AIChatDockWidget(QDockWidget):
             message: The error message text.
         """
         c = self._colors
-        escaped = (
-            message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        )
+        escaped = _plain_text_to_html(message)
         html = (
             f'<div style="background-color: {c["bg_error"]}; '
             f"border-radius: 8px; padding: 8px 12px; margin: 4px 0; "
@@ -677,8 +980,59 @@ class AIChatDockWidget(QDockWidget):
             f'<b style="color: {c["error_color"]};">Error</b><br>'
             f"{escaped}</div>"
         )
-        self.chat_display.append(html)
+        self._messages.append({"sender": "Error", "body": html, "html": True})
+        self._render_transcript()
+
+    def _append_message(self, sender: str, message: str, markdown: bool = False):
+        """Append a chat message and refresh the transcript."""
+        body = message.strip()
+        self._messages.append(
+            {"sender": sender, "body": body, "markdown": markdown, "html": False}
+        )
+        if markdown:
+            self._last_assistant_markdown = body
+            self.copy_md_btn.setEnabled(True)
+        self._render_transcript()
+
+    def _render_transcript(self):
+        """Render stored messages as HTML."""
+        c = self._colors
+        blocks = [_welcome_html(c)]
+        for msg in self._messages:
+            if msg.get("html"):
+                blocks.append(str(msg["body"]))
+                continue
+
+            sender = html.escape(str(msg["sender"]))
+            is_user = sender == "You"
+            bg = c["bg_user"] if is_user else c["bg_assistant"]
+            label = c["user_label"] if is_user else c["assistant_label"]
+            margin = "4px 0px" if is_user else "4px 0px 4px 0px"
+            if msg.get("markdown"):
+                body = _markdown_to_basic_html(str(msg["body"]))
+            else:
+                body = f"<p>{_plain_text_to_html(str(msg['body']))}</p>"
+            blocks.append(
+                f'<div style="background-color: {bg}; '
+                f"border-radius: 8px; padding: 8px 12px; "
+                f'margin: {margin}; color: {c["text"]};">'
+                f'<p style="font-weight: 600; color: {label}; margin-bottom: 4px;">'
+                f"{sender}</p>{body}</div>"
+            )
+        self.chat_display.setHtml("\n".join(blocks))
         self._scroll_to_bottom()
+
+    def _copy_latest_markdown(self):
+        """Copy the latest assistant Markdown response to the clipboard."""
+        if not self._last_assistant_markdown:
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self._last_assistant_markdown)
+            self.status_label.setText("Copied latest response as Markdown.")
+            self.status_label.setStyleSheet(
+                f"color: {self._colors['success']}; font-size: 10px;"
+            )
 
     def _scroll_to_bottom(self):
         """Scroll the chat display to the bottom."""

@@ -27,9 +27,13 @@ REQUIRED_PACKAGES = [
     ("pandas", "pandas"),
 ]
 
-# AI/LLM packages: installed separately so core plugin works without them
+# AI/LLM packages: installed separately so core plugin works without them.
 AI_PACKAGES = [
-    ("litellm", "litellm"),
+    ("geoagent", "GeoAgent[providers,nasa-opera]>=1.0.0"),
+    ("openai", "openai>=1.0"),
+    ("anthropic", "anthropic>=0.40"),
+    ("google.genai", "google-genai>=1.0"),
+    ("ollama", "ollama>=0.3"),
 ]
 
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".qgis_nasa_opera")

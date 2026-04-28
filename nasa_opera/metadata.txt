@@ -29,7 +29,7 @@ about=NASA OPERA Plugin for QGIS provides an intuitive interface for searching a
     - Plugin update checker
 
     Requirements:
-    - Python packages: earthaccess, geopandas, shapely, pandas
+    - Python packages: geoagent, earthaccess, geopandas, shapely, pandas
     - NASA Earthdata account (free registration at https://urs.earthdata.nasa.gov)
 
 tracker=https://github.com/opengeos/qgis-nasa-opera-plugin/issues
@@ -72,4 +72,3 @@ changelog=
         - Raster layer display
         - Settings panel with Earthdata credentials
         - Update checker
-

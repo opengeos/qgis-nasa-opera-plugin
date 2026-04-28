@@ -563,10 +563,10 @@ class SettingsDockWidget(QDockWidget):
         provider_group = QGroupBox("LLM Provider")
         provider_layout = QFormLayout(provider_group)
 
+        from ..ai.model_config import PROVIDERS
+
         self.ai_provider_combo = QComboBox()
-        self.ai_provider_combo.addItems(
-            ["OpenAI", "Anthropic", "Amazon Bedrock", "Google Gemini", "Ollama"]
-        )
+        self.ai_provider_combo.addItems(PROVIDERS)
         self.ai_provider_combo.currentTextChanged.connect(self._on_ai_provider_changed)
         provider_layout.addRow("Provider:", self.ai_provider_combo)
 
@@ -577,39 +577,30 @@ class SettingsDockWidget(QDockWidget):
         layout.addWidget(provider_group)
 
         # Authentication group
-        auth_group = QGroupBox("Authentication")
+        auth_group = QGroupBox("Credentials and Hosts")
         auth_layout = QFormLayout(auth_group)
 
-        self.ai_api_key_input = QLineEdit()
-        self.ai_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ai_api_key_input.setPlaceholderText("Enter API key")
-        auth_layout.addRow("API Key:", self.ai_api_key_input)
+        password_mode = QLineEdit.EchoMode.Password
 
-        self.ai_base_url_input = QLineEdit()
-        self.ai_base_url_input.setPlaceholderText("http://localhost:11434")
-        self.ai_base_url_input.setVisible(False)
-        self.ai_base_url_label = QLabel("Base URL:")
-        self.ai_base_url_label.setVisible(False)
-        auth_layout.addRow(self.ai_base_url_label, self.ai_base_url_input)
+        self.ai_openai_key_input = QLineEdit()
+        self.ai_openai_key_input.setEchoMode(password_mode)
+        auth_layout.addRow("OpenAI API key:", self.ai_openai_key_input)
 
-        # OAuth buttons
-        oauth_layout = QHBoxLayout()
-        self.ai_oauth_anthropic_btn = QPushButton("Sign in with Claude")
-        self.ai_oauth_anthropic_btn.setStyleSheet("font-size: 10px; padding: 4px 8px;")
-        self.ai_oauth_anthropic_btn.clicked.connect(
-            lambda: self._start_oauth("anthropic")
-        )
-        self.ai_oauth_anthropic_btn.setVisible(False)
-        oauth_layout.addWidget(self.ai_oauth_anthropic_btn)
+        self.ai_anthropic_key_input = QLineEdit()
+        self.ai_anthropic_key_input.setEchoMode(password_mode)
+        auth_layout.addRow("Anthropic API key:", self.ai_anthropic_key_input)
 
-        self.ai_oauth_openai_btn = QPushButton("Sign in with OpenAI")
-        self.ai_oauth_openai_btn.setStyleSheet("font-size: 10px; padding: 4px 8px;")
-        self.ai_oauth_openai_btn.clicked.connect(lambda: self._start_oauth("openai"))
-        self.ai_oauth_openai_btn.setVisible(False)
-        oauth_layout.addWidget(self.ai_oauth_openai_btn)
+        self.ai_gemini_key_input = QLineEdit()
+        self.ai_gemini_key_input.setEchoMode(password_mode)
+        auth_layout.addRow("Gemini API key:", self.ai_gemini_key_input)
 
-        oauth_layout.addStretch()
-        auth_layout.addRow("", oauth_layout)
+        self.ai_aws_region_input = QLineEdit()
+        self.ai_aws_region_input.setPlaceholderText("e.g. us-east-1")
+        auth_layout.addRow("AWS region:", self.ai_aws_region_input)
+
+        self.ai_ollama_host_input = QLineEdit()
+        self.ai_ollama_host_input.setPlaceholderText("http://127.0.0.1:11434")
+        auth_layout.addRow("Ollama host:", self.ai_ollama_host_input)
 
         # Test connection button
         self.ai_test_btn = QPushButton("Test Connection")
@@ -622,14 +613,11 @@ class SettingsDockWidget(QDockWidget):
         params_group = QGroupBox("Parameters")
         params_layout = QFormLayout(params_group)
 
-        self.ai_temperature_spin = QSpinBox()
-        self.ai_temperature_spin.setRange(0, 100)
-        self.ai_temperature_spin.setValue(30)
-        self.ai_temperature_spin.setSuffix("%")
-        params_layout.addRow("Temperature:", self.ai_temperature_spin)
+        self.ai_fast_check = QCheckBox("Use fast GeoAgent prompt")
+        params_layout.addRow("", self.ai_fast_check)
 
         self.ai_max_tokens_spin = QSpinBox()
-        self.ai_max_tokens_spin.setRange(256, 8192)
+        self.ai_max_tokens_spin.setRange(256, 32768)
         self.ai_max_tokens_spin.setValue(4096)
         self.ai_max_tokens_spin.setSingleStep(256)
         params_layout.addRow("Max Tokens:", self.ai_max_tokens_spin)
@@ -653,38 +641,17 @@ class SettingsDockWidget(QDockWidget):
         Args:
             provider_text: Display name of the selected provider.
         """
-        provider_map = {
-            "OpenAI": "openai",
-            "Anthropic": "anthropic",
-            "Amazon Bedrock": "bedrock",
-            "Google Gemini": "gemini",
-            "Ollama": "ollama",
-        }
-        provider = provider_map.get(provider_text, "openai")
+        from ..ai.model_config import AVAILABLE_MODELS, normalize_provider
 
-        # Update model list
-        from ..ai.llm_client import AVAILABLE_MODELS
+        provider = normalize_provider(provider_text)
 
         self.ai_model_combo.clear()
         models = AVAILABLE_MODELS.get(provider, [])
         self.ai_model_combo.addItems(models)
-
-        # Show/hide base URL for Ollama
-        is_ollama = provider == "ollama"
-        self.ai_base_url_input.setVisible(is_ollama)
-        self.ai_base_url_label.setVisible(is_ollama)
-        if is_ollama:
-            if not self.ai_base_url_input.text():
-                self.ai_base_url_input.setText("http://localhost:11434")
-
-        # Show/hide OAuth buttons
-        self.ai_oauth_anthropic_btn.setVisible(provider == "anthropic")
-        self.ai_oauth_openai_btn.setVisible(provider == "openai")
-
-        # API key not required for Ollama
-        self.ai_api_key_input.setPlaceholderText(
-            "Not required for local Ollama" if is_ollama else "Enter API key"
-        )
+        if not self.ai_model_combo.currentText() and models:
+            self.ai_model_combo.setCurrentText(models[0])
+        if provider == "ollama" and not self.ai_ollama_host_input.text():
+            self.ai_ollama_host_input.setText("http://127.0.0.1:11434")
 
     def _refresh_ai_deps_status(self):
         """Check and display AI dependency status."""
@@ -841,7 +808,10 @@ class SettingsDockWidget(QDockWidget):
             success, result = flow.start_flow()
 
             if success:
-                self.ai_api_key_input.setText(result)
+                if provider == "anthropic":
+                    self.ai_anthropic_key_input.setText(result)
+                elif provider == "openai":
+                    self.ai_openai_key_input.setText(result)
                 QMessageBox.information(
                     self,
                     "OAuth Success",
@@ -872,37 +842,41 @@ class SettingsDockWidget(QDockWidget):
             # Dependency check is best-effort; fall through to existing behavior.
             print(f"NASA OPERA: AI dependency check failed: {exc}", file=sys.stderr)
 
-        provider_map = {
-            "OpenAI": "openai",
-            "Anthropic": "anthropic",
-            "Amazon Bedrock": "bedrock",
-            "Google Gemini": "gemini",
-            "Ollama": "ollama",
-        }
-        provider = provider_map.get(self.ai_provider_combo.currentText(), "openai")
-        model = self.ai_model_combo.currentText()
-        api_key = self.ai_api_key_input.text().strip()
-        base_url = self.ai_base_url_input.text().strip()
+        from ..ai.model_config import (
+            apply_environment_from_settings,
+            normalize_provider,
+        )
 
-        if provider != "ollama" and not api_key:
-            QMessageBox.warning(self, "Missing API Key", "Please enter an API key.")
-            return
+        provider = normalize_provider(self.ai_provider_combo.currentText())
+        model = self.ai_model_combo.currentText()
 
         try:
-            from ..ai.llm_client import LLMClient
+            self._save_settings()
+            apply_environment_from_settings(self.settings)
 
-            client = LLMClient(
-                provider=provider,
-                model=model,
-                api_key=api_key if api_key else None,
-                base_url=base_url if base_url else None,
+            from geoagent import GeoAgent, GeoAgentConfig
+
+            agent = GeoAgent(
+                config=GeoAgentConfig(
+                    provider=provider,
+                    model=model or None,
+                    max_tokens=256,
+                ),
+                tools=[],
             )
-            success, message = client.validate_connection()
-
-            if success:
-                QMessageBox.information(self, "Connection Test", message)
+            response = agent.chat("Reply with exactly: OK")
+            if response.success:
+                QMessageBox.information(
+                    self,
+                    "Connection Test",
+                    f"Successfully connected to {provider}/{model}.",
+                )
             else:
-                QMessageBox.warning(self, "Connection Test", message)
+                QMessageBox.warning(
+                    self,
+                    "Connection Test",
+                    response.error_message or "Model did not return a response.",
+                )
         except Exception as e:
             QMessageBox.critical(self, "Connection Error", f"Test failed:\n{str(e)}")
 
@@ -1042,29 +1016,61 @@ class SettingsDockWidget(QDockWidget):
         )
 
         # AI settings
-        ai_provider = self.settings.value(
-            f"{self.SETTINGS_PREFIX}ai_provider", "OpenAI", type=str
+        from ..ai.model_config import DEFAULT_MODELS, normalize_provider
+
+        ai_provider = normalize_provider(
+            self.settings.value(
+                f"{self.SETTINGS_PREFIX}ai_provider", "openai", type=str
+            )
         )
         ai_provider_index = self.ai_provider_combo.findText(ai_provider)
         if ai_provider_index >= 0:
             self.ai_provider_combo.setCurrentIndex(ai_provider_index)
 
         ai_model = self.settings.value(f"{self.SETTINGS_PREFIX}ai_model", "", type=str)
-        if ai_model:
-            model_index = self.ai_model_combo.findText(ai_model)
-            if model_index >= 0:
-                self.ai_model_combo.setCurrentIndex(model_index)
-            else:
-                self.ai_model_combo.setEditText(ai_model)
+        ai_model = ai_model or DEFAULT_MODELS.get(ai_provider, "")
+        model_index = self.ai_model_combo.findText(ai_model)
+        if model_index >= 0:
+            self.ai_model_combo.setCurrentIndex(model_index)
+        else:
+            self.ai_model_combo.setEditText(ai_model)
 
-        self.ai_api_key_input.setText(
-            self.settings.value(f"{self.SETTINGS_PREFIX}ai_api_key", "", type=str)
+        legacy_key = self.settings.value(
+            f"{self.SETTINGS_PREFIX}ai_api_key", "", type=str
         )
-        self.ai_base_url_input.setText(
-            self.settings.value(f"{self.SETTINGS_PREFIX}ai_base_url", "", type=str)
+        self.ai_openai_key_input.setText(
+            self.settings.value(
+                f"{self.SETTINGS_PREFIX}ai_openai_api_key",
+                legacy_key if ai_provider == "openai" else "",
+                type=str,
+            )
         )
-        self.ai_temperature_spin.setValue(
-            self.settings.value(f"{self.SETTINGS_PREFIX}ai_temperature", 30, type=int)
+        self.ai_anthropic_key_input.setText(
+            self.settings.value(
+                f"{self.SETTINGS_PREFIX}ai_anthropic_api_key",
+                legacy_key if ai_provider == "anthropic" else "",
+                type=str,
+            )
+        )
+        self.ai_gemini_key_input.setText(
+            self.settings.value(
+                f"{self.SETTINGS_PREFIX}ai_gemini_api_key",
+                legacy_key if ai_provider == "gemini" else "",
+                type=str,
+            )
+        )
+        self.ai_aws_region_input.setText(
+            self.settings.value(f"{self.SETTINGS_PREFIX}ai_aws_region", "", type=str)
+        )
+        self.ai_ollama_host_input.setText(
+            self.settings.value(
+                f"{self.SETTINGS_PREFIX}ai_ollama_host",
+                self.settings.value(f"{self.SETTINGS_PREFIX}ai_base_url", "", type=str),
+                type=str,
+            )
+        )
+        self.ai_fast_check.setChecked(
+            self.settings.value(f"{self.SETTINGS_PREFIX}ai_fast_mode", False, type=bool)
         )
         self.ai_max_tokens_spin.setValue(
             self.settings.value(f"{self.SETTINGS_PREFIX}ai_max_tokens", 4096, type=int)
@@ -1124,16 +1130,28 @@ class SettingsDockWidget(QDockWidget):
             self.ai_model_combo.currentText(),
         )
         self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}ai_api_key",
-            self.ai_api_key_input.text(),
+            f"{self.SETTINGS_PREFIX}ai_openai_api_key",
+            self.ai_openai_key_input.text(),
         )
         self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}ai_base_url",
-            self.ai_base_url_input.text(),
+            f"{self.SETTINGS_PREFIX}ai_anthropic_api_key",
+            self.ai_anthropic_key_input.text(),
         )
         self.settings.setValue(
-            f"{self.SETTINGS_PREFIX}ai_temperature",
-            self.ai_temperature_spin.value(),
+            f"{self.SETTINGS_PREFIX}ai_gemini_api_key",
+            self.ai_gemini_key_input.text(),
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}ai_aws_region",
+            self.ai_aws_region_input.text(),
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}ai_ollama_host",
+            self.ai_ollama_host_input.text(),
+        )
+        self.settings.setValue(
+            f"{self.SETTINGS_PREFIX}ai_fast_mode",
+            self.ai_fast_check.isChecked(),
         )
         self.settings.setValue(
             f"{self.SETTINGS_PREFIX}ai_max_tokens",
@@ -1231,9 +1249,9 @@ class SettingsDockWidget(QDockWidget):
 
         # AI settings - don't reset API keys
         self.ai_provider_combo.setCurrentIndex(0)
-        self.ai_temperature_spin.setValue(30)
+        self.ai_fast_check.setChecked(False)
         self.ai_max_tokens_spin.setValue(4096)
-        self.ai_base_url_input.clear()
+        self.ai_ollama_host_input.clear()
 
         self.status_label.setText("Defaults restored (not saved)")
         self.status_label.setStyleSheet("color: orange; font-size: 10px;")
