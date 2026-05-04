@@ -13,7 +13,9 @@ import json
 import math
 import sys
 import tempfile
+import hashlib
 from datetime import datetime, date
+from urllib.parse import urlparse
 from typing import Optional, List, Tuple
 
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QDate, QSettings
@@ -27,7 +29,9 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QTextEdit,
     QGroupBox,
+    QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QSpinBox,
     QFormLayout,
     QMessageBox,
@@ -38,15 +42,15 @@ from qgis.PyQt.QtWidgets import (
     QHeaderView,
     QSplitter,
     QSizePolicy,
-    QApplication,
     QAbstractItemView,
     QFileDialog,
 )
-from qgis.PyQt.QtGui import QFont, QCursor, QColor
+from qgis.PyQt.QtGui import QFont, QColor
 from qgis.core import (
     QgsProject,
     QgsVectorLayer,
     QgsRasterLayer,
+    QgsRasterRange,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsRectangle,
@@ -105,6 +109,322 @@ OPERA_DATASETS = {
         "description": "Static layers for CSLC-S1 product",
     },
 }
+
+
+HDF5_EXTENSIONS = (".h5", ".hdf5", ".hdf")
+RASTER_EXTENSIONS = (".tif", ".tiff") + HDF5_EXTENSIONS
+
+
+def _filename_from_url(url: str) -> str:
+    """Return a clean filename from a local path or URL."""
+    parsed = urlparse(url)
+    path = parsed.path if parsed.path else url
+    return os.path.basename(path)
+
+
+def _is_hdf5_path(path: str) -> bool:
+    """Return True when a source path points to an HDF5 container."""
+    return _filename_from_url(path).lower().endswith(HDF5_EXTENSIONS)
+
+
+def _link_matches_layer_filter(link: str, layer_filter: str) -> bool:
+    """Match a granule link against a selected layer or filename filter."""
+    filename = _filename_from_url(link).lower()
+    layer_filter = layer_filter.lower()
+
+    if layer_filter.endswith(RASTER_EXTENSIONS):
+        return filename == layer_filter or filename.endswith(layer_filter)
+
+    return (
+        f"_{layer_filter}.tif" in filename
+        or filename.endswith(f"_{layer_filter}.tif")
+        or f"_{layer_filter}.tiff" in filename
+        or filename.endswith(f"_{layer_filter}.tiff")
+    )
+
+
+def _is_metadata_subdataset(name: str, description: str) -> bool:
+    """Return True for HDF5 subdatasets that should not be displayed as rasters."""
+    text = f"{name} {description}".lower()
+    metadata_paths = (
+        "://metadata/",
+        "://identification/",
+        "/metadata/",
+        "/identification/",
+        "/orbit/",
+        "/processinginformation/",
+        "/sourcedata/",
+        "/qa/",
+    )
+    return any(path in text for path in metadata_paths)
+
+
+def _subdataset_layer_name(base_layer_name: str, source: str, description: str) -> str:
+    """Build a readable QGIS layer name for an HDF5 subdataset."""
+    label = description
+    if "://" in source:
+        label = source.split("://", 1)[1]
+    if "]" in label:
+        label = label.split("]", 1)[-1].strip()
+    label = label.strip().strip("/")
+    if label:
+        label = label.replace("/", " - ")
+        return f"{base_layer_name} - {label}"
+    return base_layer_name
+
+
+def _parse_hdf5_subdataset_source(source: str):
+    """Return (file_path, dataset_path) for a GDAL HDF5 subdataset source."""
+    prefix = 'HDF5:"'
+    marker = '"://'
+    if not source.startswith(prefix):
+        return None
+
+    rest = source[len(prefix) :]
+    marker_index = rest.find(marker)
+    if marker_index < 0:
+        return None
+
+    file_path = rest[:marker_index]
+    dataset_path = rest[marker_index + len(marker) :]
+    if not file_path or not dataset_path:
+        return None
+    return file_path, dataset_path
+
+
+def _decode_hdf5_value(value):
+    """Convert HDF5 byte/scalar values to plain Python values."""
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _first_hdf5_dataset(group, names):
+    """Return the first matching dataset from an HDF5 group."""
+    for name in names:
+        if name in group:
+            return group[name]
+    return None
+
+
+def _georef_from_coordinate_values(x_values, y_values, width, height, spatial_ref):
+    """Build GDAL georeferencing arguments from center coordinate arrays."""
+    if len(x_values) != width or len(y_values) != height or not spatial_ref:
+        return None
+
+    x_res = float(x_values[1] - x_values[0]) if len(x_values) > 1 else 1.0
+    y_res = float(y_values[1] - y_values[0]) if len(y_values) > 1 else -1.0
+
+    upper_left_x = float(x_values[0]) - x_res / 2.0
+    upper_left_y = float(y_values[0]) - y_res / 2.0
+    lower_right_x = upper_left_x + x_res * width
+    lower_right_y = upper_left_y + y_res * height
+
+    return {
+        "output_srs": spatial_ref,
+        "output_bounds": [
+            upper_left_x,
+            upper_left_y,
+            lower_right_x,
+            lower_right_y,
+        ],
+    }
+
+
+def _read_hdf5_coordinate_values_with_gdal(file_path, dataset_path):
+    """Read a one-dimensional OPERA HDF5 coordinate dataset through GDAL."""
+    from osgeo import gdal
+
+    source = f'HDF5:"{file_path}"://{dataset_path}'
+    try:
+        dataset = gdal.Open(source)
+    except Exception:
+        dataset = None
+    if dataset is None:
+        return None
+
+    values = dataset.ReadAsArray()
+    dataset = None
+    if values is None:
+        return None
+    return values.flatten()
+
+
+def _hdf5_subdataset_georef_from_gdal(file_path, group_path, width, height):
+    """Read OPERA HDF5 georeferencing through GDAL metadata and coordinate arrays."""
+    from osgeo import gdal
+
+    x_values = None
+    y_values = None
+    for name in ("x_coordinates", "xCoordinates"):
+        x_values = _read_hdf5_coordinate_values_with_gdal(
+            file_path, f"{group_path}/{name}"
+        )
+        if x_values is not None:
+            break
+    for name in ("y_coordinates", "yCoordinates"):
+        y_values = _read_hdf5_coordinate_values_with_gdal(
+            file_path, f"{group_path}/{name}"
+        )
+        if y_values is not None:
+            break
+    if x_values is None or y_values is None:
+        return None
+
+    try:
+        container = gdal.Open(file_path)
+    except Exception:
+        container = None
+    if container is None:
+        return None
+
+    metadata = container.GetMetadata()
+    container = None
+    metadata_prefix = group_path.replace("/", "_")
+    spatial_ref = metadata.get(f"{metadata_prefix}_projection_spatial_ref")
+    if not spatial_ref:
+        epsg = metadata.get(f"{metadata_prefix}_projection_epsg_code")
+        if epsg:
+            spatial_ref = f"EPSG:{int(float(epsg))}"
+
+    return _georef_from_coordinate_values(
+        x_values, y_values, width, height, spatial_ref
+    )
+
+
+def _hdf5_subdataset_georef(source: str, width: int, height: int):
+    """Read OPERA HDF5 coordinate arrays and return GDAL Translate georef args."""
+    parsed = _parse_hdf5_subdataset_source(source)
+    if parsed is None:
+        return None
+
+    file_path, dataset_path = parsed
+    group_path = dataset_path.rsplit("/", 1)[0] if "/" in dataset_path else ""
+    if not group_path:
+        return None
+
+    georef = _hdf5_subdataset_georef_from_gdal(file_path, group_path, width, height)
+    if georef is not None:
+        return georef
+
+    if file_path.startswith("/vsi"):
+        return None
+
+    try:
+        import h5py
+    except Exception:
+        return None
+
+    try:
+        with h5py.File(file_path, "r") as hdf:
+            if group_path not in hdf:
+                return None
+
+            group = hdf[group_path]
+            x_dataset = _first_hdf5_dataset(group, ("x_coordinates", "xCoordinates"))
+            y_dataset = _first_hdf5_dataset(group, ("y_coordinates", "yCoordinates"))
+            projection_dataset = _first_hdf5_dataset(group, ("projection",))
+            if x_dataset is None or y_dataset is None or projection_dataset is None:
+                return None
+
+            x_values = x_dataset[()]
+            y_values = y_dataset[()]
+            spatial_ref = _decode_hdf5_value(
+                projection_dataset.attrs.get("spatial_ref", "")
+            )
+            if not spatial_ref:
+                epsg = projection_dataset.attrs.get("epsg_code")
+                if epsg is None:
+                    epsg = projection_dataset[()]
+                epsg = _decode_hdf5_value(epsg)
+                spatial_ref = f"EPSG:{int(epsg)}"
+
+            return _georef_from_coordinate_values(
+                x_values, y_values, width, height, spatial_ref
+            )
+    except Exception:
+        return None
+
+
+def _georeferenced_hdf5_vrt(source: str, width: int, height: int):
+    """Create a georeferenced VRT wrapper for an HDF5 raster subdataset."""
+    georef = _hdf5_subdataset_georef(source, width, height)
+    if georef is None:
+        return source
+
+    from osgeo import gdal
+
+    # SHA1 here is only a deterministic filename digest, not a security primitive.
+    digest = hashlib.sha1(source.encode("utf-8"), usedforsecurity=False).hexdigest()[
+        :16
+    ]
+    vrt_path = os.path.join(tempfile.gettempdir(), f"opera_hdf5_{digest}.vrt")
+    options = gdal.TranslateOptions(
+        format="VRT",
+        outputSRS=georef["output_srs"],
+        outputBounds=georef["output_bounds"],
+    )
+    vrt_dataset = gdal.Translate(vrt_path, source, options=options)
+    if vrt_dataset is None:
+        return source
+
+    vrt_dataset.FlushCache()
+    vrt_dataset = None
+    return vrt_path
+
+
+def _displayable_gdal_sources(path: str, layer_name: str):
+    """Return GDAL raster sources inside a file, expanding HDF5 subdatasets."""
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+
+    try:
+        dataset = gdal.Open(path)
+    except Exception:
+        dataset = None
+
+    if dataset is None:
+        return []
+
+    if dataset.RasterCount > 0:
+        dataset = None
+        return [(path, layer_name)]
+
+    subdatasets = dataset.GetSubDatasets()
+    dataset = None
+    displayable = []
+
+    for source, description in subdatasets:
+        if _is_metadata_subdataset(source, description):
+            continue
+
+        try:
+            subdataset = gdal.Open(source)
+        except Exception:
+            subdataset = None
+        if subdataset is None:
+            continue
+
+        has_raster = (
+            subdataset.RasterCount > 0
+            and subdataset.RasterXSize > 1
+            and subdataset.RasterYSize > 1
+        )
+        width = subdataset.RasterXSize
+        height = subdataset.RasterYSize
+        subdataset = None
+        if not has_raster:
+            continue
+
+        display_source = _georeferenced_hdf5_vrt(source, width, height)
+        displayable.append(
+            (display_source, _subdataset_layer_name(layer_name, source, description))
+        )
+
+    return displayable
 
 
 def _earthdata_login():
@@ -331,17 +651,15 @@ class DownloadRasterWorker(QThread):
             # Find the downloaded file
             if downloaded_files:
                 for f in downloaded_files:
-                    if isinstance(f, str) and f.endswith(filename):
-                        self.finished.emit(f, self.layer_name)
-                        return
-                    elif hasattr(f, "name") and str(f).endswith(filename):
-                        self.finished.emit(str(f), self.layer_name)
+                    f_str = str(f)
+                    if _filename_from_url(f_str) == filename:
+                        self.finished.emit(f_str, self.layer_name)
                         return
 
-                # If we couldn't find the exact file, try to find any matching tif
+                # If we couldn't find the exact file, try to find any matching raster
                 for f in downloaded_files:
                     f_str = str(f) if not isinstance(f, str) else f
-                    if f_str.endswith(".tif"):
+                    if _filename_from_url(f_str).lower().endswith(RASTER_EXTENSIONS):
                         self.finished.emit(f_str, self.layer_name)
                         return
 
@@ -355,6 +673,270 @@ class DownloadRasterWorker(QThread):
             else:
                 self.error.emit("No files were downloaded")
 
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class CogStreamWorker(QThread):
+    """Worker thread for preparing a cloud-streamed COG layer."""
+
+    ready = pyqtSignal(bool, str, str, str)  # success, vsi_path, layer_name, error
+    progress = pyqtSignal(str)
+
+    def __init__(self, url: str, layer_name: str):
+        super().__init__()
+        self.url = url
+        self.layer_name = layer_name
+
+    def run(self):
+        """Prepare and validate the COG path without blocking the QGIS UI."""
+        try:
+            from osgeo import gdal
+
+            self.progress.emit("Setting up cloud access...")
+            success, error = setup_gdal_for_earthdata()
+            if not success:
+                self.ready.emit(False, "", self.layer_name, error or "")
+                return
+
+            vsi_path = get_vsicurl_path(self.url)
+            self.progress.emit(f"Trying: {vsi_path}")
+            self.progress.emit(f"Checking COG: {self.layer_name}...")
+
+            ds = gdal.Open(vsi_path)
+            if ds is None:
+                self.ready.emit(
+                    False, "", self.layer_name, "Layer not valid via cloud access"
+                )
+                return
+
+            ds = None
+            self.ready.emit(True, vsi_path, self.layer_name, "")
+        except Exception as e:
+            self.ready.emit(False, "", self.layer_name, str(e))
+
+
+class MosaicBuildWorker(QThread):
+    """Worker thread for verifying COGs and building OPERA mosaic VRTs."""
+
+    ready = pyqtSignal(object)  # dict with VRT layer metadata
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+    progress_value = pyqtSignal(int)
+    progress_max = pyqtSignal(int)
+
+    def __init__(self, selected_granules, layer_band: str):
+        super().__init__()
+        self.selected_granules = selected_granules
+        self.layer_band = layer_band
+
+    def run(self):
+        """Verify selected raster files and build VRT mosaics."""
+        try:
+            import re
+            from osgeo import gdal, osr
+
+            total_granules = len(self.selected_granules)
+            self.progress.emit("Setting up cloud access...")
+            success, error = setup_gdal_for_earthdata()
+            if not success:
+                raise RuntimeError(f"Failed to setup cloud access: {error}")
+
+            gdal.UseExceptions()
+
+            files_by_crs = {}
+            not_found = []
+            access_failed = []
+
+            for idx, granule_info in enumerate(self.selected_granules):
+                granule_id = granule_info["granule_id"]
+                data_links = granule_info["data_links"]
+
+                self.progress.emit(f"Checking file {idx + 1}/{total_granules}...")
+
+                found = False
+                matched_any_link = False
+                for link in data_links:
+                    if _link_matches_layer_filter(link, self.layer_band):
+                        matched_any_link = True
+                        vsi_path = get_vsicurl_path(link)
+
+                        try:
+                            displayable_paths = _displayable_gdal_sources(
+                                vsi_path, self.layer_band
+                            )
+                            if displayable_paths:
+                                raster_path = displayable_paths[0][0]
+                                ds = gdal.Open(raster_path)
+                                if ds is None:
+                                    raise RuntimeError("cannot open raster subdataset")
+                                proj = ds.GetProjection()
+                                srs = osr.SpatialReference()
+                                srs.ImportFromWkt(proj)
+
+                                crs_name = (
+                                    srs.GetName() if srs.GetName() else "Unknown CRS"
+                                )
+                                zone_match = re.search(
+                                    r"(UTM zone \d+[NS]?)",
+                                    crs_name,
+                                    re.IGNORECASE,
+                                )
+                                if zone_match:
+                                    crs_short = zone_match.group(1)
+                                else:
+                                    crs_short = crs_name[:30]
+
+                                epsg = srs.GetAuthorityCode(None)
+                                if epsg:
+                                    crs_key = f"EPSG:{epsg}"
+                                else:
+                                    crs_key = proj[:100]
+
+                                if crs_key not in files_by_crs:
+                                    files_by_crs[crs_key] = {
+                                        "name": crs_short,
+                                        "paths": [],
+                                        "nodata": None,
+                                    }
+                                files_by_crs[crs_key]["paths"].append(raster_path)
+
+                                if files_by_crs[crs_key]["nodata"] is None:
+                                    band = ds.GetRasterBand(1)
+                                    files_by_crs[crs_key][
+                                        "nodata"
+                                    ] = band.GetNoDataValue()
+
+                                self.progress.emit(
+                                    f"  [{idx + 1}] OK: {_filename_from_url(link)} "
+                                    f"({crs_short})"
+                                )
+                                ds = None
+                                found = True
+                            else:
+                                access_failed.append(_filename_from_url(link))
+                                self.progress.emit(
+                                    f"  [{idx + 1}] FAILED: {_filename_from_url(link)} "
+                                    "(no displayable raster bands)"
+                                )
+                        except Exception as e:
+                            access_failed.append(_filename_from_url(link))
+                            self.progress.emit(
+                                f"  [{idx + 1}] FAILED: {_filename_from_url(link)} "
+                                f"({str(e)[:50]})"
+                            )
+                        break
+
+                if not matched_any_link:
+                    not_found.append(granule_id[:40])
+                    self.progress.emit(
+                        f"  [{idx + 1}] NOT FOUND: No {self.layer_band} in granule"
+                    )
+
+                self.progress_value.emit(idx + 1)
+
+            total_files = sum(len(v["paths"]) for v in files_by_crs.values())
+            if total_files == 0:
+                raise RuntimeError("No accessible files found for selected granules")
+
+            if not_found:
+                self.progress.emit(
+                    f"\nWarning: {len(not_found)} granules missing layer "
+                    f"{self.layer_band}"
+                )
+            if access_failed:
+                self.progress.emit(
+                    f"Warning: {len(access_failed)} files failed to open"
+                )
+
+            self.progress.emit(
+                f"\nSuccessfully verified {total_files} of {total_granules} files"
+            )
+            self.progress.emit(f"Found {len(files_by_crs)} different projection(s)")
+
+            self.progress_max.emit(total_granules + len(files_by_crs))
+
+            temp_dir = tempfile.gettempdir()
+            vrt_layers = []
+
+            for crs_idx, (_crs_key, crs_data) in enumerate(files_by_crs.items()):
+                crs_name = crs_data["name"]
+                vsi_paths = crs_data["paths"]
+
+                self.progress.emit(
+                    f"\nBuilding mosaic for {crs_name} ({len(vsi_paths)} files)..."
+                )
+
+                vrt_filename = (
+                    f"opera_mosaic_{crs_name.replace(' ', '_').replace('/', '_')}.vrt"
+                )
+                vrt_path = os.path.join(temp_dir, vrt_filename)
+
+                group_nodata = crs_data.get("nodata")
+                if (
+                    group_nodata is not None
+                    and isinstance(group_nodata, float)
+                    and math.isnan(group_nodata)
+                ):
+                    nodata_display = "NaN"
+                    vrt_options = gdal.BuildVRTOptions(
+                        resampleAlg="nearest",
+                        addAlpha=False,
+                        srcNodata="nan",
+                        VRTNodata="nan",
+                    )
+                elif group_nodata is not None:
+                    nodata_display = str(group_nodata)
+                    vrt_options = gdal.BuildVRTOptions(
+                        resampleAlg="nearest",
+                        addAlpha=False,
+                        srcNodata=group_nodata,
+                        VRTNodata=group_nodata,
+                    )
+                else:
+                    nodata_display = "auto (from source metadata)"
+                    vrt_options = gdal.BuildVRTOptions(
+                        resampleAlg="nearest",
+                        addAlpha=False,
+                    )
+                self.progress.emit(f"  Nodata value: {nodata_display}")
+
+                vrt_ds = gdal.BuildVRT(vrt_path, vsi_paths, options=vrt_options)
+                if vrt_ds is None:
+                    gdal_error = gdal.GetLastErrorMsg()
+                    self.progress.emit(
+                        f"  Warning: Failed to build VRT for {crs_name}: "
+                        f"{gdal_error}"
+                    )
+                    continue
+
+                vrt_width = vrt_ds.RasterXSize
+                vrt_height = vrt_ds.RasterYSize
+                vrt_ds.FlushCache()
+                vrt_ds = None
+
+                self.progress.emit(f"  VRT created: {vrt_width}x{vrt_height} pixels")
+                layer_name = f"OPERA Mosaic - {crs_name} ({len(vsi_paths)} scenes)"
+                vrt_layers.append(
+                    {
+                        "path": vrt_path,
+                        "layer_name": layer_name,
+                        "crs_name": crs_name,
+                        "file_count": len(vsi_paths),
+                    }
+                )
+                self.progress_value.emit(total_granules + crs_idx + 1)
+
+            if not vrt_layers:
+                raise RuntimeError("Failed to create any mosaic layers")
+
+            self.ready.emit(
+                {
+                    "layers": vrt_layers,
+                    "total_files": total_files,
+                    "total_granules": total_granules,
+                }
+            )
         except Exception as e:
             self.error.emit(str(e))
 
@@ -412,12 +994,7 @@ class DownloadGranulesWorker(QThread):
                     )
                     found = False
                     for link in data_links:
-                        if (
-                            f"_{self.layer_filter}.tif".lower() in link.lower()
-                            or link.lower().endswith(
-                                f"_{self.layer_filter}.tif".lower()
-                            )
-                        ):
+                        if _link_matches_layer_filter(link, self.layer_filter):
                             urls.append(link)
                             found = True
                             break
@@ -652,6 +1229,7 @@ class OperaDockWidget(QDockWidget):
         self._results = []
         self._gdf = None
         self._footprint_layer = None
+        self._footprint_highlight_layer = None
 
         # Rectangle drawing tool
         self._rectangle_tool = None
@@ -659,12 +1237,121 @@ class OperaDockWidget(QDockWidget):
 
         # Selection sync guard flag
         self._sync_in_progress = False
+        self._active_workers = []
 
         self.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
 
         self._setup_ui()
+
+    def _track_worker(self, worker):
+        """Keep a worker referenced while its native thread may still be running."""
+        self._prune_finished_workers()
+        self._active_workers.append(worker)
+
+    def _prune_finished_workers(self):
+        """Drop worker references only after their native threads have stopped."""
+        active = []
+        for worker in self._active_workers:
+            try:
+                if worker.isRunning():
+                    active.append(worker)
+            except RuntimeError:
+                pass
+        self._active_workers = active
+
+    def _is_project_layer_alive(self, layer):
+        """Return True if a stored QGIS layer wrapper still points to a live layer."""
+        if layer is None:
+            return False
+        try:
+            return layer.id() in QgsProject.instance().mapLayers()
+        except RuntimeError:
+            return False
+
+    def _clear_deleted_footprint_references(self):
+        """Clear cached footprint layer wrappers after QGIS deletes the C++ object."""
+        if not self._is_project_layer_alive(self._footprint_layer):
+            self._footprint_layer = None
+        if not self._is_project_layer_alive(self._footprint_highlight_layer):
+            self._footprint_highlight_layer = None
+
+    def _make_section_collapsible(self, group, settings_name):
+        """Make a group box collapse its contents while keeping the title visible."""
+        settings_key = f"NasaOpera/section_{settings_name}_visible"
+        is_visible = self.settings.value(settings_key, True, type=bool)
+
+        group.setCheckable(True)
+        group.setChecked(is_visible)
+        group.setToolTip("Uncheck to hide this section")
+        group.toggled.connect(
+            lambda visible, section=group, key=settings_key: self._on_section_toggled(
+                section, key, visible
+            )
+        )
+        self._set_section_content_visible(group, is_visible)
+
+    def _on_section_toggled(self, group, settings_key, visible):
+        """Persist and apply a collapsible section visibility change."""
+        self._set_section_content_visible(group, visible)
+        self.settings.setValue(settings_key, visible)
+
+    def _set_section_content_visible(self, group, visible):
+        """Show or hide every layout item inside a collapsible group box."""
+        layout = group.layout()
+        if layout is not None:
+            for index in range(layout.count()):
+                self._set_layout_item_visible(layout.itemAt(index), visible)
+
+        if visible:
+            group.setMaximumHeight(16777215)
+        else:
+            collapsed_height = group.fontMetrics().height() + 18
+            group.setMaximumHeight(collapsed_height)
+
+        layout = group.layout()
+        if layout is not None:
+            layout.activate()
+        group.updateGeometry()
+        parent = group.parentWidget()
+        if parent is not None:
+            parent.updateGeometry()
+        self._resize_splitter_section(group, visible)
+
+    def _set_layout_item_visible(self, item, visible):
+        """Recursively show or hide widgets owned by a layout item."""
+        if item is None:
+            return
+
+        widget = item.widget()
+        if widget is not None:
+            widget.setVisible(visible)
+            return
+
+        child_layout = item.layout()
+        if child_layout is None:
+            return
+
+        for index in range(child_layout.count()):
+            self._set_layout_item_visible(child_layout.itemAt(index), visible)
+
+    def _resize_splitter_section(self, group, visible):
+        """Adjust splitter space when a split section is expanded or collapsed."""
+        parent = group.parentWidget()
+        if not isinstance(parent, QSplitter):
+            return
+
+        section_index = parent.indexOf(group)
+        sizes = parent.sizes()
+        if section_index < 0 or section_index >= len(sizes):
+            return
+
+        if visible:
+            sizes[section_index] = max(sizes[section_index], group.sizeHint().height())
+        else:
+            sizes[section_index] = group.maximumHeight()
+        parent.setSizes(sizes)
 
     def _setup_ui(self):
         """Set up the dock widget UI."""
@@ -708,6 +1395,7 @@ class OperaDockWidget(QDockWidget):
         dataset_layout.addRow(self.dataset_desc_label)
 
         layout.addWidget(dataset_group)
+        self._make_section_collapsible(dataset_group, "dataset")
 
         # Search parameters group
         search_group = QGroupBox("Search Parameters")
@@ -722,7 +1410,9 @@ class OperaDockWidget(QDockWidget):
 
         # Bounding box
         self.bbox_input = QLineEdit()
-        self.bbox_input.setPlaceholderText("xmin, ymin, xmax, ymax (or use map extent)")
+        self.bbox_input.setPlaceholderText(
+            "xmin, ymin, xmax, ymax (blank uses current map extent)"
+        )
         search_layout.addRow("Bounding Box:", self.bbox_input)
 
         # Use map extent button
@@ -758,6 +1448,7 @@ class OperaDockWidget(QDockWidget):
         search_layout.addRow("Date Range:", date_layout)
 
         layout.addWidget(search_group)
+        self._make_section_collapsible(search_group, "search_parameters")
 
         # Search button
         search_btn_layout = QHBoxLayout()
@@ -855,6 +1546,34 @@ class OperaDockWidget(QDockWidget):
         layer_layout.addRow("Layer:", self.layer_combo)
         results_layout.addLayout(layer_layout)
 
+        # Display-time NoData option
+        nodata_layout = QHBoxLayout()
+        self.nodata_check = QCheckBox("Treat value as NoData")
+        self.nodata_check.setToolTip(
+            "Render matching raster pixels as transparent when layers are added"
+        )
+        self.nodata_value_spin = QDoubleSpinBox()
+        self.nodata_value_spin.setDecimals(6)
+        self.nodata_value_spin.setRange(-1_000_000_000, 1_000_000_000)
+        self.nodata_value_spin.setValue(
+            self.settings.value("NasaOpera/display_nodata_value", 0.0, type=float)
+        )
+        self.nodata_value_spin.setEnabled(False)
+        self.nodata_value_spin.setToolTip(
+            "Raster value to mark as NoData, for example 0"
+        )
+        apply_nodata = self.settings.value(
+            "NasaOpera/display_apply_nodata", False, type=bool
+        )
+        self.nodata_check.setChecked(apply_nodata)
+        self.nodata_value_spin.setEnabled(apply_nodata)
+        self.nodata_check.toggled.connect(self.nodata_value_spin.setEnabled)
+        self.nodata_check.toggled.connect(self._save_display_nodata_settings)
+        self.nodata_value_spin.valueChanged.connect(self._save_display_nodata_settings)
+        nodata_layout.addWidget(self.nodata_check)
+        nodata_layout.addWidget(self.nodata_value_spin)
+        layer_layout.addRow("NoData:", nodata_layout)
+
         # Display buttons (Single + Mosaic)
         display_btn_layout = QHBoxLayout()
 
@@ -894,22 +1613,39 @@ class OperaDockWidget(QDockWidget):
 
         results_layout.addLayout(download_btn_layout)
 
-        layout.addWidget(results_group)
-
         # Output area
         output_group = QGroupBox("Output")
         output_layout = QVBoxLayout(output_group)
+        output_layout.setContentsMargins(6, 6, 6, 6)
+        output_layout.setSpacing(0)
 
         self.output_text = QTextEdit()
         self.output_text.setReadOnly(True)
-        self.output_text.setMaximumHeight(120)
+        self.output_text.setMinimumHeight(140)
+        self.output_text.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.output_text.setPlaceholderText(
             "Search results and status messages will appear here..."
         )
         self.output_text.setStyleSheet("font-family: monospace; font-size: 10px;")
         output_layout.addWidget(self.output_text)
 
-        layout.addWidget(output_group)
+        output_group.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+
+        self.results_output_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.results_output_splitter.setChildrenCollapsible(False)
+        self.results_output_splitter.setHandleWidth(6)
+        self.results_output_splitter.addWidget(results_group)
+        self.results_output_splitter.addWidget(output_group)
+        self._make_section_collapsible(results_group, "results")
+        self._make_section_collapsible(output_group, "output")
+        self.results_output_splitter.setStretchFactor(0, 3)
+        self.results_output_splitter.setStretchFactor(1, 2)
+        self.results_output_splitter.setSizes([360, 220])
+        layout.addWidget(self.results_output_splitter, stretch=1)
 
         # Initialize dataset description
         self._on_dataset_changed(0)
@@ -924,24 +1660,37 @@ class OperaDockWidget(QDockWidget):
     def _use_map_extent(self):
         """Use current map extent as bounding box."""
         try:
-            canvas = self.iface.mapCanvas()
-            extent = canvas.extent()
-
-            # Transform to WGS84
-            source_crs = canvas.mapSettings().destinationCrs()
-            dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-
-            if source_crs != dest_crs:
-                transform = QgsCoordinateTransform(
-                    source_crs, dest_crs, QgsProject.instance()
-                )
-                extent = transform.transformBoundingBox(extent)
-
-            bbox_str = f"{extent.xMinimum():.6f}, {extent.yMinimum():.6f}, {extent.xMaximum():.6f}, {extent.yMaximum():.6f}"
-            self.bbox_input.setText(bbox_str)
+            bbox = self._current_map_extent_bbox()
+            self.bbox_input.setText(self._format_bbox(bbox))
 
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to get map extent: {str(e)}")
+
+    def _current_map_extent_bbox(self):
+        """Return the current map canvas extent as an EPSG:4326 bbox tuple."""
+        canvas = self.iface.mapCanvas()
+        extent = canvas.extent()
+
+        source_crs = canvas.mapSettings().destinationCrs()
+        dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+
+        if source_crs != dest_crs:
+            transform = QgsCoordinateTransform(
+                source_crs, dest_crs, QgsProject.instance()
+            )
+            extent = transform.transformBoundingBox(extent)
+
+        return (
+            extent.xMinimum(),
+            extent.yMinimum(),
+            extent.xMaximum(),
+            extent.yMaximum(),
+        )
+
+    def _format_bbox(self, bbox):
+        """Format a bbox tuple for display in the bbox input."""
+        xmin, ymin, xmax, ymax = bbox
+        return f"{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}"
 
     def _activate_draw_rectangle(self):
         """Activate the rectangle drawing tool on the map canvas."""
@@ -1021,6 +1770,21 @@ class OperaDockWidget(QDockWidget):
             except ValueError:
                 QMessageBox.warning(self, "Error", "Invalid bounding box format")
                 return
+        else:
+            try:
+                bbox = self._current_map_extent_bbox()
+                self.output_text.clear()
+                self.output_text.append(
+                    f"Using current map extent: {self._format_bbox(bbox)}"
+                )
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    "Bounding box is blank and the current map extent could not "
+                    f"be read:\n{str(e)}",
+                )
+                return
 
         # Get dates
         start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
@@ -1032,7 +1796,8 @@ class OperaDockWidget(QDockWidget):
         self.progress_bar.setVisible(True)
         self.status_label.setText("Searching...")
         self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
-        self.output_text.clear()
+        if bbox_text:
+            self.output_text.clear()
 
         # Create and start worker
         self._search_worker = SearchWorker(
@@ -1045,6 +1810,7 @@ class OperaDockWidget(QDockWidget):
         self._search_worker.finished.connect(self._on_search_finished)
         self._search_worker.error.connect(self._on_search_error)
         self._search_worker.progress.connect(self._on_search_progress)
+        self._track_worker(self._search_worker)
         self._search_worker.start()
 
     def _on_search_progress(self, message):
@@ -1155,10 +1921,16 @@ class OperaDockWidget(QDockWidget):
             self.layer_combo.clear()
             self.layer_combo.setEnabled(False)
             # Clear map selection
+            self._clear_deleted_footprint_references()
             if self._footprint_layer is not None:
                 self._sync_in_progress = True
-                self._footprint_layer.removeSelection()
-                self._sync_in_progress = False
+                try:
+                    self._footprint_layer.removeSelection()
+                    self._update_footprint_highlight([])
+                except RuntimeError:
+                    self._clear_deleted_footprint_references()
+                finally:
+                    self._sync_in_progress = False
             return
 
         # Get the first selected granule to populate layer dropdown
@@ -1182,8 +1954,8 @@ class OperaDockWidget(QDockWidget):
 
         for link in data_links:
             # Get filename from URL
-            filename = link.split("/")[-1]
-            if filename.endswith(".tif") or filename.endswith(".h5"):
+            filename = _filename_from_url(link)
+            if filename.lower().endswith(RASTER_EXTENSIONS):
                 # Store just the layer suffix (e.g., B01_WTR.tif)
                 self.layer_combo.addItem(filename, link)
 
@@ -1200,6 +1972,7 @@ class OperaDockWidget(QDockWidget):
         Args:
             selected_rows: Set of selected row indices in the table.
         """
+        self._clear_deleted_footprint_references()
         if self._footprint_layer is None:
             return
         if self._sync_in_progress:
@@ -1218,8 +1991,9 @@ class OperaDockWidget(QDockWidget):
 
             try:
                 self._footprint_layer.selectByIds(feature_ids)
-            except Exception:
-                self._footprint_layer = None
+                self._update_footprint_highlight(feature_ids)
+            except (Exception, RuntimeError):
+                self._clear_deleted_footprint_references()
         finally:
             self._sync_in_progress = False
 
@@ -1234,10 +2008,15 @@ class OperaDockWidget(QDockWidget):
         if self._sync_in_progress:
             return
 
+        self._clear_deleted_footprint_references()
+        if self._footprint_layer is None:
+            return
+
         self._sync_in_progress = True
         try:
             # Get selected feature IDs from the layer
             selected_fids = self._footprint_layer.selectedFeatureIds()
+            self._update_footprint_highlight(selected_fids)
 
             # Build a mapping from granule_index to table row
             index_to_row = {}
@@ -1257,8 +2036,78 @@ class OperaDockWidget(QDockWidget):
                         item = self.granule_table.item(row, col)
                         if item is not None:
                             item.setSelected(True)
+        except RuntimeError:
+            self._clear_deleted_footprint_references()
         finally:
             self._sync_in_progress = False
+
+    def _ensure_footprint_highlight_layer(self):
+        """Create the selected-footprint overlay layer when needed."""
+        self._clear_deleted_footprint_references()
+        if self._footprint_layer is None:
+            return None
+
+        if self._footprint_highlight_layer is not None:
+            return self._footprint_highlight_layer
+
+        from qgis.core import QgsFillSymbol
+
+        crs = self._footprint_layer.crs()
+        crs_authid = crs.authid() if crs.isValid() else "EPSG:4326"
+        highlight_layer = QgsVectorLayer(
+            f"Polygon?crs={crs_authid}",
+            "OPERA Selected Footprints",
+            "memory",
+        )
+
+        symbol = QgsFillSymbol.createSimple(
+            {
+                "color": "255,235,59,110",
+                "outline_color": "255,255,0,255",
+                "outline_width": "1.4",
+            }
+        )
+        highlight_layer.renderer().setSymbol(symbol)
+        QgsProject.instance().addMapLayer(highlight_layer)
+        self._footprint_highlight_layer = highlight_layer
+        return highlight_layer
+
+    def _update_footprint_highlight(self, feature_ids):
+        """Mirror selected footprint geometries into the highlight overlay layer."""
+        self._clear_deleted_footprint_references()
+        if self._footprint_layer is None:
+            return
+
+        highlight_layer = self._ensure_footprint_highlight_layer()
+        if highlight_layer is None:
+            return
+
+        provider = highlight_layer.dataProvider()
+        existing_ids = [feature.id() for feature in highlight_layer.getFeatures()]
+        if existing_ids:
+            provider.deleteFeatures(existing_ids)
+
+        highlight_features = []
+        for feature_id in feature_ids:
+            # Stale ids can survive a search refresh; skip silently.
+            try:
+                source_feature = self._footprint_layer.getFeature(feature_id)
+            except Exception:  # nosec B112
+                continue
+
+            if not source_feature.isValid() or not source_feature.hasGeometry():
+                continue
+
+            highlight_feature = QgsFeature()
+            highlight_feature.setGeometry(QgsGeometry(source_feature.geometry()))
+            highlight_features.append(highlight_feature)
+
+        if highlight_features:
+            provider.addFeatures(highlight_features)
+
+        highlight_layer.updateExtents()
+        highlight_layer.triggerRepaint()
+        self.iface.mapCanvas().refresh()
 
     def _select_all_granules(self):
         """Select all granules in the table."""
@@ -1295,50 +2144,48 @@ class OperaDockWidget(QDockWidget):
             return
 
         granule = self._results[granule_index]
-        layer_name = self.layer_combo.currentText().replace(".tif", "")
+        layer_name = os.path.splitext(self.layer_combo.currentText())[0]
 
         # Check if it's a COG (GeoTIFF) file - try streaming first
-        is_tif = url.lower().endswith((".tif", ".tiff"))
+        is_tif = _filename_from_url(url).lower().endswith((".tif", ".tiff"))
 
         if is_tif:
-            # Show waiting state
             self._set_busy_state(True)
             self.status_label.setText(f"Loading COG: {layer_name}...")
             self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
             self.output_text.append(f"\nTrying to stream COG: {layer_name}")
             self.progress_bar.setVisible(True)
             self.progress_bar.setRange(0, 0)  # Indeterminate
-            QApplication.processEvents()  # Update UI
+            self._pending_single_download = {
+                "granule": granule,
+                "url": url,
+                "layer_name": layer_name,
+            }
+            self._cog_stream_worker = CogStreamWorker(url, layer_name)
+            self._cog_stream_worker.progress.connect(self._on_cog_stream_progress)
+            self._cog_stream_worker.ready.connect(self._on_cog_stream_ready)
+            self._cog_stream_worker.finished.connect(
+                self._on_cog_stream_thread_finished
+            )
+            self._track_worker(self._cog_stream_worker)
+            self._cog_stream_worker.start()
+            return
 
-            # Try cloud access first
-            success = self._try_load_cog(url, layer_name)
+        self._start_single_download(granule, url, layer_name)
 
-            if success:
-                self._set_busy_state(False)
-                self.progress_bar.setVisible(False)
-                return  # Successfully loaded via cloud access
-
-            # If cloud access failed, fall back to download
-            self.output_text.append("Cloud access failed, falling back to download...")
-            QApplication.processEvents()
-
-        # For non-COG files or if COG access failed, download the file
+    def _start_single_download(self, granule, url, layer_name):
+        """Download one raster file in a background worker."""
         self._set_busy_state(True)
         self.status_label.setText(f"Downloading {layer_name}...")
         self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
         self.output_text.append(f"Downloading layer: {layer_name}")
-
-        # Disable buttons during download
-        self.display_single_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate
 
-        # Get download directory from settings or use temp
         download_dir = self.settings.value("NasaOpera/cache_dir", "")
         if not download_dir:
             download_dir = os.path.join(tempfile.gettempdir(), "nasa_opera_cache")
 
-        # Create and start download worker
         self._download_worker = DownloadRasterWorker(
             granule=granule,
             url=url,
@@ -1348,22 +2195,70 @@ class OperaDockWidget(QDockWidget):
         self._download_worker.finished.connect(self._on_download_finished)
         self._download_worker.error.connect(self._on_download_error)
         self._download_worker.progress.connect(self._on_download_progress)
+        self._track_worker(self._download_worker)
         self._download_worker.start()
 
+    def _on_cog_stream_progress(self, message):
+        """Handle COG streaming preparation progress."""
+        self.status_label.setText(message)
+        self.output_text.append(message)
+
+    def _on_cog_stream_ready(self, success, vsi_path, layer_name, error):
+        """Handle completion of COG streaming preparation."""
+        if success:
+            self.progress_bar.setVisible(False)
+            try:
+                self._add_raster_layer_to_map(vsi_path, layer_name)
+                self.status_label.setText(f"Loaded (streaming): {layer_name}")
+                self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
+                self.output_text.append("Successfully loaded COG via cloud streaming!")
+            except Exception as exc:
+                self.status_label.setText("Failed to load streamed layer")
+                self.status_label.setStyleSheet("color: #EF5350; font-size: 10px;")
+                self.output_text.append(f"Error loading streamed layer: {exc}")
+                QMessageBox.critical(
+                    self, "Error", f"Failed to load streamed layer:\n{exc}"
+                )
+            finally:
+                self._set_busy_state(False)
+                self._pending_single_download = None
+            return
+
+        self.output_text.append(f"Cloud access failed: {error}")
+        self.output_text.append("Falling back to download...")
+        pending = getattr(self, "_pending_single_download", None)
+        if pending is None:
+            self.progress_bar.setVisible(False)
+            self._set_busy_state(False)
+            return
+
+        self._start_single_download(
+            pending["granule"], pending["url"], pending["layer_name"]
+        )
+        self._pending_single_download = None
+
+    def _on_cog_stream_thread_finished(self):
+        """Release the COG worker only after Qt reports the thread is stopped."""
+        worker = self.sender() or self._cog_stream_worker
+        if worker is not None:
+            if worker in self._active_workers:
+                self._active_workers.remove(worker)
+            worker.deleteLater()
+        if self._cog_stream_worker is worker:
+            self._cog_stream_worker = None
+
     def _set_busy_state(self, busy: bool):
-        """Set the UI to busy/waiting state.
+        """Set operation controls to busy or ready state.
 
         Args:
-            busy: True to show waiting cursor, False to restore normal cursor
+            busy: True to disable operation buttons, False to restore them.
         """
         if busy:
-            QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
             self.display_single_btn.setEnabled(False)
             self.display_mosaic_btn.setEnabled(False)
             self.download_single_layer_btn.setEnabled(False)
             self.download_all_layers_btn.setEnabled(False)
         else:
-            QApplication.restoreOverrideCursor()
             # Re-enable buttons based on selection state
             selected_rows = set()
             for item in self.granule_table.selectedItems():
@@ -1374,68 +2269,122 @@ class OperaDockWidget(QDockWidget):
             self.download_single_layer_btn.setEnabled(num_selected >= 1)
             self.download_all_layers_btn.setEnabled(num_selected >= 1)
 
-    def _try_load_cog(self, url: str, layer_name: str) -> bool:
-        """Try to load a Cloud-Optimized GeoTIFF directly via streaming.
+    def _save_display_nodata_settings(self, *_args):
+        """Persist the display-time raster NoData option."""
+        self.settings.setValue(
+            "NasaOpera/display_apply_nodata", self.nodata_check.isChecked()
+        )
+        self.settings.setValue(
+            "NasaOpera/display_nodata_value", self.nodata_value_spin.value()
+        )
 
-        Args:
-            url: The URL to the COG file
-            layer_name: The name for the layer
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Setup GDAL for Earthdata access
-            self.status_label.setText("Setting up cloud access...")
-            QApplication.processEvents()
-
-            success, error = setup_gdal_for_earthdata()
-            if not success:
-                self.output_text.append(f"Failed to setup cloud access: {error}")
-                return False
-
-            # Get the VSICURL/VSIS3 path
-            vsi_path = get_vsicurl_path(url)
-            self.output_text.append(f"Trying: {vsi_path}")
-
-            self.status_label.setText(f"Streaming COG: {layer_name}...")
-            QApplication.processEvents()
-
-            # Try to create the raster layer
-            layer = QgsRasterLayer(vsi_path, layer_name)
-
-            if layer.isValid():
-                QgsProject.instance().addMapLayer(layer)
-
-                # Zoom to layer extent with CRS transformation
-                layer_extent = layer.extent()
-                layer_crs = layer.crs()
-                canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-
-                if (
-                    layer_crs.isValid()
-                    and canvas_crs.isValid()
-                    and layer_crs != canvas_crs
-                ):
-                    transform = QgsCoordinateTransform(
-                        layer_crs, canvas_crs, QgsProject.instance()
-                    )
-                    layer_extent = transform.transformBoundingBox(layer_extent)
-
-                self.iface.mapCanvas().setExtent(layer_extent)
-                self.iface.mapCanvas().refresh()
-
-                self.status_label.setText(f"Loaded (streaming): {layer_name}")
-                self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
-                self.output_text.append("Successfully loaded COG via cloud streaming!")
-                return True
-            else:
-                self.output_text.append("Layer not valid via cloud access")
-                return False
-
-        except Exception as e:
-            self.output_text.append(f"Cloud access error: {str(e)}")
+    def _apply_display_nodata(self, layer):
+        """Apply the panel NoData setting to a raster layer before display."""
+        if not self.nodata_check.isChecked():
             return False
+
+        value = self.nodata_value_spin.value()
+        try:
+            provider = layer.dataProvider()
+            band_count = provider.bandCount()
+        except Exception as exc:
+            self.output_text.append(
+                f"  Warning: Could not inspect raster bands for NoData: {exc}"
+            )
+            return False
+
+        nodata_ranges = [QgsRasterRange(value, value)]
+        errors = []
+
+        for band in range(1, band_count + 1):
+            try:
+                provider.setUserNoDataValue(band, nodata_ranges)
+            except Exception as exc:
+                errors.append(f"band {band}: {exc}")
+
+        if errors:
+            self.output_text.append(
+                "  Warning: Could not apply NoData value "
+                f"{value:g} to {layer.name()} ({'; '.join(errors)})"
+            )
+            return False
+
+        layer.triggerRepaint()
+        self.output_text.append(f"  Applied NoData value {value:g} to {layer.name()}")
+        return True
+
+    def _add_raster_layer_to_map(self, path: str, layer_name: str):
+        """Add a raster layer to the project and zoom the map canvas to it."""
+        layer = QgsRasterLayer(path, layer_name)
+        if not layer.isValid():
+            raise RuntimeError(f"Layer is not valid: {path}")
+
+        self._apply_display_nodata(layer)
+        QgsProject.instance().addMapLayer(layer)
+
+        layer_extent = layer.extent()
+        layer_crs = layer.crs()
+        canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+
+        if layer_crs.isValid() and canvas_crs.isValid() and layer_crs != canvas_crs:
+            transform = QgsCoordinateTransform(
+                layer_crs, canvas_crs, QgsProject.instance()
+            )
+            layer_extent = transform.transformBoundingBox(layer_extent)
+
+        self.iface.mapCanvas().setExtent(layer_extent)
+        self.iface.mapCanvas().refresh()
+        return layer
+
+    def _add_raster_layers_to_map(self, path: str, layer_name: str):
+        """Add a raster file or its HDF5 subdatasets to the map."""
+        try:
+            sources = _displayable_gdal_sources(path, layer_name)
+        except Exception as exc:
+            if _is_hdf5_path(path):
+                raise RuntimeError(f"Could not inspect HDF5 file: {exc}") from exc
+            sources = [(path, layer_name)]
+
+        if not sources:
+            if _is_hdf5_path(path):
+                raise RuntimeError(
+                    "The HDF5 file does not contain displayable raster bands. "
+                    "This OPERA file appears to contain metadata only."
+                )
+            sources = [(path, layer_name)]
+
+        layers = []
+        combined_extent = None
+
+        for source, source_layer_name in sources:
+            layer = QgsRasterLayer(source, source_layer_name)
+            if not layer.isValid():
+                raise RuntimeError(f"Layer is not valid: {source}")
+
+            self._apply_display_nodata(layer)
+            QgsProject.instance().addMapLayer(layer)
+            layers.append(layer)
+
+            layer_extent = layer.extent()
+            layer_crs = layer.crs()
+            canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+
+            if layer_crs.isValid() and canvas_crs.isValid() and layer_crs != canvas_crs:
+                transform = QgsCoordinateTransform(
+                    layer_crs, canvas_crs, QgsProject.instance()
+                )
+                layer_extent = transform.transformBoundingBox(layer_extent)
+
+            if combined_extent is None:
+                combined_extent = QgsRectangle(layer_extent)
+            else:
+                combined_extent.combineExtentWith(layer_extent)
+
+        if combined_extent is not None:
+            self.iface.mapCanvas().setExtent(combined_extent)
+            self.iface.mapCanvas().refresh()
+
+        return layers
 
     def _on_download_progress(self, message):
         """Handle download progress update."""
@@ -1448,36 +2397,16 @@ class OperaDockWidget(QDockWidget):
         self._set_busy_state(False)
 
         try:
-            # Add raster layer from local file
-            layer = QgsRasterLayer(file_path, layer_name)
-
-            if layer.isValid():
-                QgsProject.instance().addMapLayer(layer)
-
-                # Zoom to layer extent with CRS transformation
-                layer_extent = layer.extent()
-                layer_crs = layer.crs()
-                canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-
-                if (
-                    layer_crs.isValid()
-                    and canvas_crs.isValid()
-                    and layer_crs != canvas_crs
-                ):
-                    transform = QgsCoordinateTransform(
-                        layer_crs, canvas_crs, QgsProject.instance()
-                    )
-                    layer_extent = transform.transformBoundingBox(layer_extent)
-
-                self.iface.mapCanvas().setExtent(layer_extent)
-                self.iface.mapCanvas().refresh()
-
-                self.status_label.setText(f"Loaded: {layer_name}")
-                self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
-                self.output_text.append(f"Successfully loaded layer: {layer_name}")
-                self.output_text.append(f"File: {file_path}")
+            layers = self._add_raster_layers_to_map(file_path, layer_name)
+            if len(layers) == 1:
+                self.status_label.setText(f"Loaded: {layers[0].name()}")
             else:
-                raise Exception(f"Layer is not valid: {file_path}")
+                self.status_label.setText(
+                    f"Loaded {len(layers)} HDF5 raster subdatasets"
+                )
+            self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
+            self.output_text.append(f"Successfully loaded layer: {layer_name}")
+            self.output_text.append(f"File: {file_path}")
 
         except Exception as e:
             self.status_label.setText("Failed to load layer")
@@ -1499,11 +2428,7 @@ class OperaDockWidget(QDockWidget):
         )
 
     def _display_mosaic(self):
-        """Display a virtual mosaic from selected granules.
-
-        Creates separate mosaics for each projection/UTM zone to ensure proper alignment.
-        Uses a determinate progress bar that updates after each file is verified.
-        """
+        """Display a virtual mosaic from selected granules."""
         selected_rows = set()
         for item in self.granule_table.selectedItems():
             selected_rows.add(item.row())
@@ -1511,29 +2436,33 @@ class OperaDockWidget(QDockWidget):
             QMessageBox.warning(self, "Error", "No granules selected")
             return
 
-        # Get the selected layer type - extract just the layer suffix (e.g., B01_WTR.tif)
-        layer_filename = self.layer_combo.currentText()
-        if not layer_filename or layer_filename == "No raster files available":
+        layer_band = self._get_layer_band()
+        if not layer_band:
             QMessageBox.warning(self, "Error", "No layer type selected")
             return
 
-        # Extract the layer band identifier from the filename
-        import re
-
-        match = re.search(r"_(B\d+_[A-Za-z0-9]+)\.tif$", layer_filename, re.IGNORECASE)
-        if match:
-            layer_band = match.group(1)
-        else:
-            match = re.search(r"_([VH]{2})\.tif$", layer_filename, re.IGNORECASE)
-            if match:
-                layer_band = match.group(1)
-            else:
-                parts = layer_filename.replace(".tif", "").split("_")
-                layer_band = parts[-1] if parts else layer_filename
-
         num_selected = len(selected_rows)
+        selected_granules = []
+        for row in sorted(selected_rows):
+            granule_index = self.granule_table.item(row, 0).data(
+                Qt.ItemDataRole.UserRole
+            )
+            if granule_index is None or granule_index >= len(self._results):
+                continue
 
-        # Show busy state with determinate progress bar
+            granule = self._results[granule_index]
+            data_links = granule.data_links() if hasattr(granule, "data_links") else []
+            selected_granules.append(
+                {
+                    "granule_id": self.granule_table.item(row, 0).text(),
+                    "data_links": data_links,
+                }
+            )
+
+        if not selected_granules:
+            QMessageBox.warning(self, "Error", "No valid granules selected")
+            return
+
         self._set_busy_state(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, num_selected)
@@ -1542,284 +2471,115 @@ class OperaDockWidget(QDockWidget):
         self.status_label.setStyleSheet("color: #64B5F6; font-size: 10px;")
         self.output_text.append(f"\nCreating mosaic from {num_selected} granules...")
         self.output_text.append(f"Layer band: {layer_band}")
-        QApplication.processEvents()
 
-        try:
-            from osgeo import gdal, osr
+        self._mosaic_worker = MosaicBuildWorker(selected_granules, layer_band)
+        self._mosaic_worker.progress.connect(self._on_mosaic_progress)
+        self._mosaic_worker.progress_value.connect(self.progress_bar.setValue)
+        self._mosaic_worker.progress_max.connect(self.progress_bar.setMaximum)
+        self._mosaic_worker.ready.connect(self._on_mosaic_ready)
+        self._mosaic_worker.error.connect(self._on_mosaic_error)
+        self._mosaic_worker.finished.connect(self._on_mosaic_thread_finished)
+        self._track_worker(self._mosaic_worker)
+        self._mosaic_worker.start()
 
-            # Setup GDAL for Earthdata access
-            self.output_text.append("Setting up cloud access...")
-            QApplication.processEvents()
+    def _on_mosaic_progress(self, message):
+        """Handle mosaic build progress."""
+        self.status_label.setText(message.strip() or "Building mosaic...")
+        self.output_text.append(message)
 
-            success, error = setup_gdal_for_earthdata()
-            if not success:
-                raise Exception(f"Failed to setup cloud access: {error}")
+    def _on_mosaic_ready(self, result):
+        """Handle background mosaic completion and add VRT layers to QGIS."""
+        self.progress_bar.setVisible(False)
+        self._set_busy_state(False)
 
-            # Enable GDAL errors for debugging
-            gdal.UseExceptions()
+        layers_created = []
+        combined_extent = None
 
-            # Collect URLs for all selected granules, grouped by CRS
-            files_by_crs = {}
-            not_found = []
-            access_failed = []
-
-            total_granules = num_selected
-            for idx, row in enumerate(sorted(selected_rows)):
-                granule_index = self.granule_table.item(row, 0).data(
-                    Qt.ItemDataRole.UserRole
-                )
-                if granule_index is None or granule_index >= len(self._results):
-                    self.progress_bar.setValue(idx + 1)
-                    continue
-
-                granule = self._results[granule_index]
-                granule_id = self.granule_table.item(row, 0).text()
-                data_links = (
-                    granule.data_links() if hasattr(granule, "data_links") else []
-                )
-
-                self.status_label.setText(
-                    f"Checking file {idx + 1}/{total_granules}..."
-                )
-                QApplication.processEvents()
-
-                # Find the matching layer file by band identifier
-                found = False
-                for link in data_links:
-                    if (
-                        f"_{layer_band}.tif".lower() in link.lower()
-                        or link.lower().endswith(f"_{layer_band}.tif".lower())
-                    ):
-                        vsi_path = get_vsicurl_path(link)
-
-                        # Verify the file is accessible and get its CRS
-                        try:
-                            ds = gdal.Open(vsi_path)
-                            if ds is not None:
-                                # Get the CRS
-                                proj = ds.GetProjection()
-                                srs = osr.SpatialReference()
-                                srs.ImportFromWkt(proj)
-
-                                crs_name = (
-                                    srs.GetName() if srs.GetName() else "Unknown CRS"
-                                )
-                                zone_match = re.search(
-                                    r"(UTM zone \d+[NS]?)",
-                                    crs_name,
-                                    re.IGNORECASE,
-                                )
-                                if zone_match:
-                                    crs_short = zone_match.group(1)
-                                else:
-                                    crs_short = crs_name[:30]
-
-                                epsg = srs.GetAuthorityCode(None)
-                                if epsg:
-                                    crs_key = f"EPSG:{epsg}"
-                                else:
-                                    crs_key = proj[:100]
-
-                                if crs_key not in files_by_crs:
-                                    files_by_crs[crs_key] = {
-                                        "name": crs_short,
-                                        "paths": [],
-                                        "nodata": None,
-                                    }
-                                files_by_crs[crs_key]["paths"].append(vsi_path)
-
-                                if files_by_crs[crs_key]["nodata"] is None:
-                                    band = ds.GetRasterBand(1)
-                                    files_by_crs[crs_key][
-                                        "nodata"
-                                    ] = band.GetNoDataValue()
-
-                                self.output_text.append(
-                                    f"  [{idx + 1}] OK: {os.path.basename(link)} ({crs_short})"
-                                )
-                                ds = None  # Close dataset
-                                found = True
-                            else:
-                                access_failed.append(os.path.basename(link))
-                                self.output_text.append(
-                                    f"  [{idx + 1}] FAILED: {os.path.basename(link)} (cannot open)"
-                                )
-                        except Exception as e:
-                            access_failed.append(os.path.basename(link))
-                            self.output_text.append(
-                                f"  [{idx + 1}] FAILED: {os.path.basename(link)} ({str(e)[:50]})"
-                            )
-                        break
-
-                if not found and granule_id not in [
-                    f[:30] + "..." for f in access_failed
-                ]:
-                    not_found.append(granule_id[:40])
-                    self.output_text.append(
-                        f"  [{idx + 1}] NOT FOUND: No {layer_band} in granule"
-                    )
-
-                self.progress_bar.setValue(idx + 1)
-                QApplication.processEvents()
-
-            if not_found:
+        for layer_info in result["layers"]:
+            layer = QgsRasterLayer(layer_info["path"], layer_info["layer_name"])
+            if not layer.isValid():
                 self.output_text.append(
-                    f"\nWarning: {len(not_found)} granules missing layer {layer_band}"
+                    f"  Warning: Failed to load VRT layer for "
+                    f"{layer_info['crs_name']}"
                 )
-            if access_failed:
-                self.output_text.append(
-                    f"Warning: {len(access_failed)} files failed to open"
+                continue
+
+            self._apply_display_nodata(layer)
+            QgsProject.instance().addMapLayer(layer)
+            layers_created.append(layer)
+
+            layer_extent = layer.extent()
+            layer_crs = layer.crs()
+            canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+
+            if layer_crs.isValid() and canvas_crs.isValid() and layer_crs != canvas_crs:
+                transform = QgsCoordinateTransform(
+                    layer_crs, canvas_crs, QgsProject.instance()
                 )
+                layer_extent = transform.transformBoundingBox(layer_extent)
 
-            total_files = sum(len(v["paths"]) for v in files_by_crs.values())
-            if total_files == 0:
-                raise Exception("No accessible files found for selected granules")
+            if combined_extent is None:
+                combined_extent = QgsRectangle(layer_extent)
+            else:
+                combined_extent.combineExtentWith(layer_extent)
 
-            self.output_text.append(
-                f"\nSuccessfully verified {total_files} of {total_granules} files"
-            )
-            self.output_text.append(
-                f"Found {len(files_by_crs)} different projection(s)"
-            )
-            QApplication.processEvents()
+            self.output_text.append(f"  Layer added: {layer_info['layer_name']}")
 
-            # Create separate VRT for each CRS group
-            temp_dir = tempfile.gettempdir()
-            layers_created = []
-            combined_extent = None
-
-            for crs_idx, (crs_key, crs_data) in enumerate(files_by_crs.items()):
-                crs_name = crs_data["name"]
-                vsi_paths = crs_data["paths"]
-
-                self.status_label.setText(
-                    f"Building mosaic {crs_idx + 1}/{len(files_by_crs)} ({crs_name})..."
-                )
-                self.output_text.append(
-                    f"\nBuilding mosaic for {crs_name} ({len(vsi_paths)} files)..."
-                )
-                QApplication.processEvents()
-
-                # Create VRT for this CRS group
-                vrt_filename = (
-                    f"opera_mosaic_{crs_name.replace(' ', '_').replace('/', '_')}.vrt"
-                )
-                vrt_path = os.path.join(temp_dir, vrt_filename)
-
-                # Use nodata value detected from source files
-                group_nodata = crs_data.get("nodata")
-                if (
-                    group_nodata is not None
-                    and isinstance(group_nodata, float)
-                    and math.isnan(group_nodata)
-                ):
-                    nodata_display = "NaN"
-                    vrt_options = gdal.BuildVRTOptions(
-                        resampleAlg="nearest",
-                        addAlpha=False,
-                        srcNodata="nan",
-                        VRTNodata="nan",
-                    )
-                elif group_nodata is not None:
-                    nodata_display = str(group_nodata)
-                    vrt_options = gdal.BuildVRTOptions(
-                        resampleAlg="nearest",
-                        addAlpha=False,
-                        srcNodata=group_nodata,
-                        VRTNodata=group_nodata,
-                    )
-                else:
-                    nodata_display = "auto (from source metadata)"
-                    vrt_options = gdal.BuildVRTOptions(
-                        resampleAlg="nearest",
-                        addAlpha=False,
-                    )
-                self.output_text.append(f"  Nodata value: {nodata_display}")
-
-                vrt_ds = gdal.BuildVRT(vrt_path, vsi_paths, options=vrt_options)
-                if vrt_ds is None:
-                    gdal_error = gdal.GetLastErrorMsg()
-                    self.output_text.append(
-                        f"  Warning: Failed to build VRT for {crs_name}: {gdal_error}"
-                    )
-                    continue
-
-                # Get VRT info
-                vrt_width = vrt_ds.RasterXSize
-                vrt_height = vrt_ds.RasterYSize
-                vrt_ds.FlushCache()
-                vrt_ds = None
-
-                self.output_text.append(
-                    f"  VRT created: {vrt_width}x{vrt_height} pixels"
-                )
-
-                # Load VRT as raster layer
-                layer_name = f"OPERA Mosaic - {crs_name} ({len(vsi_paths)} scenes)"
-                layer = QgsRasterLayer(vrt_path, layer_name)
-
-                if layer.isValid():
-                    QgsProject.instance().addMapLayer(layer)
-                    layers_created.append(layer)
-
-                    # Track combined extent (transform to canvas CRS)
-                    layer_extent = layer.extent()
-                    layer_crs = layer.crs()
-                    canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-
-                    if (
-                        layer_crs.isValid()
-                        and canvas_crs.isValid()
-                        and layer_crs != canvas_crs
-                    ):
-                        transform = QgsCoordinateTransform(
-                            layer_crs, canvas_crs, QgsProject.instance()
-                        )
-                        layer_extent = transform.transformBoundingBox(layer_extent)
-
-                    if combined_extent is None:
-                        combined_extent = QgsRectangle(layer_extent)
-                    else:
-                        combined_extent.combineExtentWith(layer_extent)
-
-                    self.output_text.append(f"  Layer added: {layer_name}")
-                else:
-                    self.output_text.append(
-                        f"  Warning: Failed to load VRT layer for {crs_name}"
-                    )
-
-                QApplication.processEvents()
-
-            if not layers_created:
-                raise Exception("Failed to create any mosaic layers")
-
-            # Zoom to combined extent
-            if combined_extent:
-                combined_extent.scale(1.05)  # Add 5% buffer
-                self.iface.mapCanvas().setExtent(combined_extent)
-                self.iface.mapCanvas().refresh()
-
-            self.status_label.setText(f"Created {len(layers_created)} mosaic layer(s)")
-            self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
-            self.output_text.append(
-                f"\nSuccessfully created {len(layers_created)} mosaic layer(s) "
-                f"with {total_files} scenes total!"
-            )
-
-        except Exception as e:
+        if not layers_created:
             self.status_label.setText("Mosaic failed")
             self.status_label.setStyleSheet("color: #EF5350; font-size: 10px;")
-            self.output_text.append(f"\nError creating mosaic: {str(e)}")
+            error_msg = "Failed to create any mosaic layers"
+            self.output_text.append(f"\nError creating mosaic: {error_msg}")
             QMessageBox.critical(
-                self, "Mosaic Error", f"Failed to create mosaic:\n{str(e)}"
+                self, "Mosaic Error", f"Failed to create mosaic:\n{error_msg}"
             )
+            return
 
-        finally:
-            self._set_busy_state(False)
-            self.progress_bar.setVisible(False)
+        if combined_extent:
+            combined_extent.scale(1.05)
+            self.iface.mapCanvas().setExtent(combined_extent)
+            self.iface.mapCanvas().refresh()
+
+        self.status_label.setText(f"Created {len(layers_created)} mosaic layer(s)")
+        self.status_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
+        self.output_text.append(
+            f"\nSuccessfully created {len(layers_created)} mosaic layer(s) "
+            f"with {result['total_files']} scenes total!"
+        )
+
+    def _on_mosaic_error(self, error_msg):
+        """Handle background mosaic errors."""
+        self.progress_bar.setVisible(False)
+        self._set_busy_state(False)
+
+        self.status_label.setText("Mosaic failed")
+        self.status_label.setStyleSheet("color: #EF5350; font-size: 10px;")
+        self.output_text.append(f"\nError creating mosaic: {error_msg}")
+        QMessageBox.critical(
+            self, "Mosaic Error", f"Failed to create mosaic:\n{error_msg}"
+        )
+
+    def _on_mosaic_thread_finished(self):
+        """Release the mosaic worker only after Qt reports the thread is stopped."""
+        worker = self.sender() or self._mosaic_worker
+        if worker is not None:
+            if worker in self._active_workers:
+                self._active_workers.remove(worker)
+            worker.deleteLater()
+        if self._mosaic_worker is worker:
+            self._mosaic_worker = None
 
     def _remove_footprint_layer(self):
         """Remove the footprint layer from the map if it exists."""
+        if self._footprint_highlight_layer is not None:
+            try:
+                layer_id = self._footprint_highlight_layer.id()
+                if layer_id in QgsProject.instance().mapLayers():
+                    QgsProject.instance().removeMapLayer(layer_id)
+            except RuntimeError:
+                pass
+            self._footprint_highlight_layer = None
+
         if self._footprint_layer is not None:
             try:
                 layer_id = self._footprint_layer.id()
@@ -1831,7 +2591,9 @@ class OperaDockWidget(QDockWidget):
 
         # Also remove any orphaned footprint layers by name
         for lyr in list(QgsProject.instance().mapLayers().values()):
-            if lyr.name().startswith("OPERA Footprints"):
+            if lyr.name().startswith("OPERA Footprints") or lyr.name().startswith(
+                "OPERA Selected Footprints"
+            ):
                 QgsProject.instance().removeMapLayer(lyr.id())
 
         self.iface.mapCanvas().refresh()
@@ -1943,6 +2705,9 @@ class OperaDockWidget(QDockWidget):
         if not layer_filename or layer_filename == "No raster files available":
             return None
 
+        if layer_filename.lower().endswith(HDF5_EXTENSIONS):
+            return layer_filename
+
         match = re.search(r"_(B\d+_[A-Za-z0-9]+)\.tif$", layer_filename, re.IGNORECASE)
         if match:
             return match.group(1)
@@ -1985,6 +2750,7 @@ class OperaDockWidget(QDockWidget):
         self._download_granules_worker.file_downloaded.connect(self._on_file_downloaded)
         self._download_granules_worker.finished.connect(self._on_bulk_download_finished)
         self._download_granules_worker.error.connect(self._on_bulk_download_error)
+        self._track_worker(self._download_granules_worker)
         self._download_granules_worker.start()
 
     def _download_single_layer(self):
@@ -2117,9 +2883,20 @@ class OperaDockWidget(QDockWidget):
             self.iface.mapCanvas().unsetMapTool(self._rectangle_tool)
             self._rectangle_tool = None
 
-        # Clean up any running worker threads
-        for attr_name in ("_download_granules_worker", "_search_worker"):
+        # Clean up any running worker threads.
+        workers = list(self._active_workers)
+        for attr_name in (
+            "_cog_stream_worker",
+            "_download_granules_worker",
+            "_download_worker",
+            "_mosaic_worker",
+            "_search_worker",
+        ):
             worker = getattr(self, attr_name, None)
+            if worker is not None and worker not in workers:
+                workers.append(worker)
+
+        for worker in workers:
             if worker is not None:
                 if hasattr(worker, "cancel"):
                     try:
@@ -2138,4 +2915,5 @@ class OperaDockWidget(QDockWidget):
                             file=sys.stderr,
                         )
 
+        self._active_workers.clear()
         event.accept()

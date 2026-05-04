@@ -12,6 +12,8 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMenu, QToolBar, QMessageBox
 
+OPEN_GEOAGENT_PLUGIN_CANDIDATES = ("open_geoagent",)
+
 
 class NasaOpera:
     """NASA OPERA implementation class for QGIS."""
@@ -31,7 +33,6 @@ class NasaOpera:
         # Dock widgets (lazy loaded)
         self._opera_dock = None
         self._settings_dock = None
-        self._ai_chat_dock = None
 
     def add_action(
         self,
@@ -117,7 +118,7 @@ class NasaOpera:
             parent=self.iface.mainWindow(),
         )
 
-        # Add AI Assistant action (checkable for dock toggle)
+        # Add AI Assistant action. The chat UI is owned by OpenGeoAgent.
         ai_icon = os.path.join(icon_base, "ai_chat.svg")
         if not os.path.exists(ai_icon):
             ai_icon = ":/images/themes/default/mActionHelpContents.svg"
@@ -125,9 +126,8 @@ class NasaOpera:
         self.ai_chat_action = self.add_action(
             ai_icon,
             "AI Assistant",
-            self.toggle_ai_chat_dock,
-            status_tip="Toggle AI Assistant Chat Panel",
-            checkable=True,
+            self.open_ai_assistant,
+            status_tip="Open the OpenGeoAgent chat panel",
             parent=self.iface.mainWindow(),
         )
 
@@ -180,11 +180,6 @@ class NasaOpera:
             self._settings_dock.deleteLater()
             self._settings_dock = None
 
-        if self._ai_chat_dock:
-            self.iface.removeDockWidget(self._ai_chat_dock)
-            self._ai_chat_dock.deleteLater()
-            self._ai_chat_dock = None
-
         # Remove actions from menu
         for action in self.actions:
             self.iface.removePluginMenu("&NASA OPERA", action)
@@ -202,26 +197,20 @@ class NasaOpera:
         if self._opera_dock is None:
             # Check dependencies before creating the search panel
             try:
-                from .deps_manager import all_dependencies_met
+                from .deps_manager import all_dependencies_met, get_missing_packages
 
                 if not all_dependencies_met():
-                    reply = QMessageBox.warning(
+                    missing = ", ".join(get_missing_packages())
+                    QMessageBox.warning(
                         self.iface.mainWindow(),
                         "Missing Dependencies",
                         "The NASA OPERA plugin requires additional Python "
-                        "packages (earthaccess, geopandas, shapely, pandas) "
-                        "that are not installed.\n\n"
-                        "Would you like to open the Settings panel to "
-                        "install them?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.Yes,
+                        "packages that are not installed.\n\n"
+                        f"Missing packages: {missing}\n\n"
+                        "Install them in the QGIS Python environment, or in "
+                        "an environment available on the QGIS Python path, "
+                        "then restart QGIS.",
                     )
-                    if reply == QMessageBox.StandardButton.Yes:
-                        self.opera_action.setChecked(False)
-                        self.toggle_settings_dock()
-                        if self._settings_dock is not None:
-                            self._settings_dock.show_dependencies_tab()
-                        return
                     self.opera_action.setChecked(False)
                     return
             except Exception as exc:
@@ -263,70 +252,122 @@ class NasaOpera:
         """Handle Opera dock visibility change."""
         self.opera_action.setChecked(visible)
 
-    def toggle_ai_chat_dock(self):
-        """Toggle the AI Assistant chat dock widget visibility."""
-        if self._ai_chat_dock is None:
-            # Check AI dependencies
-            try:
-                from .deps_manager import all_ai_dependencies_met
+    def open_ai_assistant(self):
+        """Open the OpenGeoAgent chat panel, or prompt for plugin installation."""
+        plugin = self._get_open_geoagent_plugin()
+        if plugin is None:
+            self._prompt_open_geoagent_install()
+            return
 
-                if not all_ai_dependencies_met():
-                    reply = QMessageBox.warning(
-                        self.iface.mainWindow(),
-                        "AI Dependencies Missing",
-                        "The AI Assistant requires GeoAgent provider packages.\n\n"
-                        "Would you like to open Settings to install it?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.Yes,
-                    )
-                    if reply == QMessageBox.StandardButton.Yes:
-                        self.ai_chat_action.setChecked(False)
-                        self.toggle_settings_dock()
-                        if self._settings_dock is not None:
-                            self._settings_dock.show_ai_tab()
-                        return
-                    self.ai_chat_action.setChecked(False)
-                    return
+        if not hasattr(plugin, "toggle_chat_dock"):
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "OpenGeoAgent Required",
+                "OpenGeoAgent is installed, but this version does not expose "
+                "the chat panel launcher expected by NASA OPERA.\n\n"
+                "Please update OpenGeoAgent and try again.",
+            )
+            return
+
+        try:
+            chat_dock = getattr(plugin, "_chat_dock", None)
+            if chat_dock is not None and chat_dock.isVisible():
+                chat_dock.show()
+                chat_dock.raise_()
+                return
+
+            plugin.toggle_chat_dock()
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "OpenGeoAgent",
+                f"Failed to open the OpenGeoAgent chat panel:\n{exc}",
+            )
+
+    def _get_open_geoagent_plugin(self):
+        """Return the loaded OpenGeoAgent plugin instance, loading it if possible."""
+        try:
+            import qgis.utils as qgis_utils
+        except Exception as exc:
+            print(f"NASA OPERA: could not import qgis.utils: {exc}", file=sys.stderr)
+            return None
+
+        plugins = getattr(qgis_utils, "plugins", {}) or {}
+        for package_name in OPEN_GEOAGENT_PLUGIN_CANDIDATES:
+            plugin = plugins.get(package_name)
+            if plugin is not None:
+                return plugin
+
+        available = set(getattr(qgis_utils, "available_plugins", []) or [])
+        for package_name in OPEN_GEOAGENT_PLUGIN_CANDIDATES:
+            if package_name not in available:
+                continue
+
+            try:
+                load_plugin = getattr(qgis_utils, "loadPlugin", None)
+                if callable(load_plugin) and package_name not in plugins:
+                    load_plugin(package_name)
+
+                start_plugin = getattr(qgis_utils, "startPlugin", None)
+                active_plugins = getattr(qgis_utils, "active_plugins", []) or []
+                if callable(start_plugin) and package_name not in active_plugins:
+                    start_plugin(package_name)
+
+                plugins = getattr(qgis_utils, "plugins", {}) or {}
+                plugin = plugins.get(package_name)
+                if plugin is not None:
+                    return plugin
             except Exception as exc:
-                # Dependency check is best-effort; fall through to existing behavior.
-                print(f"NASA OPERA: AI dependency check failed: {exc}", file=sys.stderr)
+                print(
+                    f"NASA OPERA: failed to load OpenGeoAgent plugin "
+                    f"'{package_name}': {exc}",
+                    file=sys.stderr,
+                )
 
-            try:
-                from .dialogs.ai_chat_dock import AIChatDockWidget
+        return None
 
-                self._ai_chat_dock = AIChatDockWidget(
-                    self.iface, self.iface.mainWindow()
-                )
-                self._ai_chat_dock.setObjectName("NasaOperaAIChatDock")
-                self._ai_chat_dock.visibilityChanged.connect(
-                    self._on_ai_chat_visibility_changed
-                )
-                self.iface.addDockWidget(
-                    Qt.DockWidgetArea.RightDockWidgetArea, self._ai_chat_dock
-                )
-                self._ai_chat_dock.show()
-                self._ai_chat_dock.raise_()
+    def _prompt_open_geoagent_install(self):
+        """Tell the user how to install OpenGeoAgent from the QGIS Plugin Manager."""
+        message = (
+            "The AI Assistant is provided by the OpenGeoAgent QGIS plugin.\n\n"
+            "Install it from the QGIS Plugin Manager:\n"
+            "  Plugins > Manage and Install Plugins... > All\n"
+            "  Search for 'OpenGeoAgent' and click Install Plugin.\n\n"
+            "After installing (or enabling) OpenGeoAgent, click the AI "
+            "Assistant button again."
+        )
+        box = QMessageBox(self.iface.mainWindow())
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Install OpenGeoAgent")
+        box.setText(message)
+        manager_button = box.addButton(
+            "Open Plugin Manager", QMessageBox.ButtonRole.ActionRole
+        )
+        box.addButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+        if box.clickedButton() == manager_button:
+            self._open_qgis_plugin_manager()
+
+    def _open_qgis_plugin_manager(self):
+        """Open the QGIS Plugin Manager dialog."""
+        try:
+            action = self.iface.actionManagePlugins()
+            if action is not None:
+                action.trigger()
                 return
+        except Exception as exc:
+            print(
+                f"NASA OPERA: could not open QGIS Plugin Manager: {exc}",
+                file=sys.stderr,
+            )
 
-            except Exception as e:
-                QMessageBox.critical(
-                    self.iface.mainWindow(),
-                    "Error",
-                    f"Failed to create AI Assistant panel:\n{str(e)}",
-                )
-                self.ai_chat_action.setChecked(False)
-                return
-
-        # Toggle visibility
-        if self._ai_chat_dock.isVisible():
-            self._ai_chat_dock.hide()
-        else:
-            self._ai_chat_dock.show()
-            self._ai_chat_dock.raise_()
-
-    def _on_ai_chat_visibility_changed(self, visible):
-        """Handle AI chat dock visibility change."""
-        self.ai_chat_action.setChecked(visible)
+        QMessageBox.information(
+            self.iface.mainWindow(),
+            "Open Plugin Manager",
+            "Open the QGIS Plugin Manager from the menu:\n"
+            "Plugins > Manage and Install Plugins...",
+        )
 
     def toggle_settings_dock(self):
         """Toggle the Settings dock widget visibility."""

@@ -3,7 +3,7 @@ name=NASA OPERA
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 description=Search and visualize NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products.
-version=0.8.1
+version=0.8.2
 author=Qiusheng Wu
 email=giswqs@gmail.com
 
@@ -29,7 +29,7 @@ about=NASA OPERA Plugin for QGIS provides an intuitive interface for searching a
     - Plugin update checker
 
     Requirements:
-    - Python packages: geoagent, earthaccess, geopandas, shapely, pandas
+    - Python packages: earthaccess, geopandas, shapely, pandas
     - NASA Earthdata account (free registration at https://urs.earthdata.nasa.gov)
 
 tracker=https://github.com/opengeos/qgis-nasa-opera-plugin/issues
@@ -47,6 +47,9 @@ experimental=False
 deprecated=False
 
 changelog=
+    0.8.2
+        - Remove bundled AI assistant panel and dependency installers
+        - Route the AI Assistant button to OpenGeoAgent
     0.8.1
         - Update AI models in README and LLM client
     0.8.0
@@ -54,12 +57,12 @@ changelog=
     0.7.0
         - Add AI assistant for natural language OPERA data interaction (#19)
     0.6.0
-        - Use uv for faster dependency installation (#16)
+        - Use uv for faster package setup (#16)
     0.5.0
         - Fix cryptic 'lost sys.stdin' error (#14)
         - Fix Windows venv creation failure with QGIS embedded Python (#15)
     0.4.0
-        - Add one-click dependency installer (#13)
+        - Add one-click package setup (#13)
     0.3.0
         - Enhance search UI with interactive features and download options (#11)
     0.2.0
