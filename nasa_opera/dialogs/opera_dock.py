@@ -723,6 +723,7 @@ class MosaicBuildWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
     progress_value = pyqtSignal(int)
+    progress_max = pyqtSignal(int)
 
     def __init__(self, selected_granules, layer_band: str):
         super().__init__()
@@ -754,8 +755,10 @@ class MosaicBuildWorker(QThread):
                 self.progress.emit(f"Checking file {idx + 1}/{total_granules}...")
 
                 found = False
+                matched_any_link = False
                 for link in data_links:
                     if _link_matches_layer_filter(link, self.layer_band):
+                        matched_any_link = True
                         vsi_path = get_vsicurl_path(link)
 
                         try:
@@ -824,9 +827,7 @@ class MosaicBuildWorker(QThread):
                             )
                         break
 
-                if not found and granule_id not in [
-                    f[:30] + "..." for f in access_failed
-                ]:
+                if not matched_any_link:
                     not_found.append(granule_id[:40])
                     self.progress.emit(
                         f"  [{idx + 1}] NOT FOUND: No {self.layer_band} in granule"
@@ -852,6 +853,8 @@ class MosaicBuildWorker(QThread):
                 f"\nSuccessfully verified {total_files} of {total_granules} files"
             )
             self.progress.emit(f"Found {len(files_by_crs)} different projection(s)")
+
+            self.progress_max.emit(total_granules + len(files_by_crs))
 
             temp_dir = tempfile.gettempdir()
             vrt_layers = []
@@ -2472,6 +2475,7 @@ class OperaDockWidget(QDockWidget):
         self._mosaic_worker = MosaicBuildWorker(selected_granules, layer_band)
         self._mosaic_worker.progress.connect(self._on_mosaic_progress)
         self._mosaic_worker.progress_value.connect(self.progress_bar.setValue)
+        self._mosaic_worker.progress_max.connect(self.progress_bar.setMaximum)
         self._mosaic_worker.ready.connect(self._on_mosaic_ready)
         self._mosaic_worker.error.connect(self._on_mosaic_error)
         self._mosaic_worker.finished.connect(self._on_mosaic_thread_finished)
