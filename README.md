@@ -112,11 +112,11 @@ available on the QGIS Python path:
 
 The NASA OPERA toolbar includes an AI Assistant button that opens the
 OpenGeoAgent chat panel. If OpenGeoAgent is not installed or enabled, NASA
-OPERA prompts you to install it.
+OPERA prompts you to install it from the QGIS Plugin Manager:
 
-Install the `open_geoagent` package into your QGIS plugins folder (the same
-folder that holds `nasa_opera`). Source code:
-[opengeos/GeoAgent](https://github.com/opengeos/GeoAgent/tree/main/qgis_geoagent/open_geoagent).
+1. Open **Plugins > Manage and Install Plugins...**
+2. Search for **OpenGeoAgent** and click **Install Plugin**
+3. Click the AI Assistant button in the NASA OPERA toolbar again
 
 OpenGeoAgent owns the chat interface, LLM provider settings, and AI dependency
 installation.

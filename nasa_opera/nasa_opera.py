@@ -8,14 +8,11 @@ integration, menu items, toolbar buttons, and dockable panels.
 import os
 import sys
 
-from qgis.PyQt.QtCore import Qt, QUrl
-from qgis.PyQt.QtGui import QDesktopServices, QIcon
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMenu, QToolBar, QMessageBox
 
 OPEN_GEOAGENT_PLUGIN_CANDIDATES = ("open_geoagent",)
-OPEN_GEOAGENT_REPO_URL = (
-    "https://github.com/opengeos/GeoAgent/tree/main/qgis_geoagent/open_geoagent"
-)
 
 
 class NasaOpera:
@@ -329,41 +326,48 @@ class NasaOpera:
 
         return None
 
-    def _open_geoagent_plugins_dir(self):
-        """Return the QGIS plugins folder where OpenGeoAgent should live."""
-        return os.path.dirname(self.plugin_dir)
-
     def _prompt_open_geoagent_install(self):
-        """Tell the user where to install OpenGeoAgent from."""
-        plugins_dir = self._open_geoagent_plugins_dir()
-        candidate = OPEN_GEOAGENT_PLUGIN_CANDIDATES[0]
-        target_dir = os.path.join(plugins_dir, candidate)
-
+        """Tell the user how to install OpenGeoAgent from the QGIS Plugin Manager."""
         message = (
             "The AI Assistant is provided by the OpenGeoAgent QGIS plugin.\n\n"
-            "Install or enable OpenGeoAgent, then click the AI Assistant "
-            "button again.\n\n"
-            f"Source: {OPEN_GEOAGENT_REPO_URL}\n\n"
-            f"Install into your QGIS plugins folder:\n{target_dir}"
+            "Install it from the QGIS Plugin Manager:\n"
+            "  Plugins > Manage and Install Plugins... > All\n"
+            "  Search for 'OpenGeoAgent' and click Install Plugin.\n\n"
+            "After installing (or enabling) OpenGeoAgent, click the AI "
+            "Assistant button again."
         )
         box = QMessageBox(self.iface.mainWindow())
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("Install OpenGeoAgent")
         box.setText(message)
-        open_button = box.addButton(
-            "Open Plugins Folder", QMessageBox.ButtonRole.ActionRole
-        )
-        repo_button = box.addButton(
-            "Open Repository", QMessageBox.ButtonRole.ActionRole
+        manager_button = box.addButton(
+            "Open Plugin Manager", QMessageBox.ButtonRole.ActionRole
         )
         box.addButton(QMessageBox.StandardButton.Ok)
         box.exec()
 
-        clicked = box.clickedButton()
-        if clicked == open_button:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(plugins_dir))
-        elif clicked == repo_button:
-            QDesktopServices.openUrl(QUrl(OPEN_GEOAGENT_REPO_URL))
+        if box.clickedButton() == manager_button:
+            self._open_qgis_plugin_manager()
+
+    def _open_qgis_plugin_manager(self):
+        """Open the QGIS Plugin Manager dialog."""
+        try:
+            action = self.iface.actionManagePlugins()
+            if action is not None:
+                action.trigger()
+                return
+        except Exception as exc:
+            print(
+                f"NASA OPERA: could not open QGIS Plugin Manager: {exc}",
+                file=sys.stderr,
+            )
+
+        QMessageBox.information(
+            self.iface.mainWindow(),
+            "Open Plugin Manager",
+            "Open the QGIS Plugin Manager from the menu:\n"
+            "Plugins > Manage and Install Plugins...",
+        )
 
     def toggle_settings_dock(self):
         """Toggle the Settings dock widget visibility."""
