@@ -3,7 +3,7 @@
 [![QGIS](https://img.shields.io/badge/QGIS-3.28+-green.svg)](https://qgis.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A QGIS plugin for searching, visualizing, and analyzing NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products -- with an AI assistant for natural language interaction.
+A QGIS plugin for searching, visualizing, and analyzing NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products.
 
 ## About NASA OPERA
 
@@ -17,8 +17,7 @@ Learn more: [NASA OPERA Project](https://www.jpl.nasa.gov/go/opera)
 - **Footprint Visualization**: Display search result footprints as vector layers on the map
 - **Raster Display**: Visualize OPERA raster data directly in QGIS with cloud-optimized streaming
 - **Virtual Mosaics**: Combine multiple granules into seamless mosaics via GDAL VRT
-- **AI Assistant**: Use natural language to search, display, and analyze OPERA data (powered by LLMs)
-- **Multiple LLM Providers**: OpenAI, Anthropic, Amazon Bedrock, Google Gemini, and local Ollama
+- **OpenGeoAgent Launch**: Open the OpenGeoAgent chat panel from the NASA OPERA toolbar
 - **Multiple Datasets**: Support for all OPERA products:
   - DSWX-HLS: Dynamic Surface Water Extent from Harmonized Landsat Sentinel-2
   - DSWX-S1: Dynamic Surface Water Extent from Sentinel-1
@@ -26,7 +25,7 @@ Learn more: [NASA OPERA Project](https://www.jpl.nasa.gov/go/opera)
   - DIST-ANN-HLS: Land Surface Disturbance Annual
   - RTC-S1: Radiometric Terrain Corrected SAR Backscatter
   - CSLC-S1: Coregistered Single-Look Complex
-- **Settings Panel**: Configure Earthdata credentials, display options, and AI provider
+- **Settings Panel**: Configure Earthdata credentials, display options, and search defaults
 - **Update Checker**: Check for plugin updates from GitHub
 
 ## Prerequisites
@@ -41,17 +40,13 @@ To access NASA OPERA data, you need a free NASA Earthdata account:
 
 ### Python Dependencies
 
-The plugin manages dependencies automatically via an isolated virtual environment. On first use, open **Settings > Dependencies** and click **Install Dependencies** to install:
+Install these packages in the QGIS Python environment, or in an environment
+available on the QGIS Python path:
 
 - `earthaccess` - NASA Earthdata search and download
 - `geopandas` - Geospatial data manipulation
 - `shapely` - Geometry operations
 - `pandas` - Data analysis
-
-For the AI Assistant, open **Settings > AI Assistant** and click **Install AI Dependencies** to install:
-
-- `GeoAgent[providers,nasa-opera]` - GeoAgent tools and model providers
-- Provider clients for OpenAI, Anthropic, Gemini, and Ollama
 
 ## Installation
 
@@ -115,45 +110,24 @@ For the AI Assistant, open **Settings > AI Assistant** and click **Install AI De
 
 ### AI Assistant
 
-The AI Assistant lets you interact with NASA OPERA data using natural language.
+The NASA OPERA toolbar includes an AI Assistant button that opens the
+OpenGeoAgent chat panel. If OpenGeoAgent is not installed or enabled, NASA
+OPERA prompts you to install it.
 
-1. **Setup**: Go to **NASA OPERA > Settings > AI Assistant** tab
-   - Install AI dependencies
-   - Select your LLM provider (OpenAI, Anthropic, Bedrock, Gemini, or Ollama)
-   - Enter the provider credentials or host settings
-   - Click "Test Connection" to verify
+Install the `open_geoagent` package into your QGIS plugins folder (the same
+folder that holds `nasa_opera`). Source code:
+[opengeos/GeoAgent](https://github.com/opengeos/GeoAgent/tree/main/qgis_geoagent/open_geoagent).
 
-2. **Open**: Click the AI Assistant icon in the toolbar or go to **NASA OPERA > AI Assistant**
-
-3. **Ask Questions**: Type natural language queries such as:
-   - "What OPERA datasets are available?"
-   - "Search for surface water data in my current map extent"
-   - "Find land disturbance alerts in California from 2024"
-   - "Show me the latest DSWX-HLS data for Las Vegas area"
-   - "Create a mosaic of the first 5 results"
-   - "What layers do I have loaded?"
-
-The AI assistant can search data, display footprints, load rasters, create mosaics, and manage map layers -- all through conversation.
-
-**Supported LLM Providers:**
-
-| Provider | Default Model | API Key Required |
-|----------|--------------|-----------------|
-| OpenAI | gpt-5.5 | Yes |
-| Anthropic | claude-sonnet-4-6 | Yes |
-| Amazon Bedrock | claude-sonnet-4-20250514 | AWS credentials |
-| Google Gemini | gemini-3.1-flash-lite-preview | Yes |
-| Ollama | qwen3.5:4b | No (local) |
+OpenGeoAgent owns the chat interface, LLM provider settings, and AI dependency
+installation.
 
 ### Settings
 
 Access settings via **NASA OPERA > Settings**:
 
-- **Dependencies**: Install and manage core Python packages
 - **Credentials**: Configure your NASA Earthdata username and password
 - **Display**: Customize footprint styles and default colormap
 - **Advanced**: Set default search parameters and cache options
-- **AI Assistant**: Configure LLM provider, model, API key, and parameters
 
 ### First-Time Authentication
 
@@ -173,19 +147,9 @@ qgis-nasa-opera-plugin/
 │   ├── __init__.py            # Plugin entry point
 │   ├── nasa_opera.py          # Main plugin class
 │   ├── metadata.txt           # Plugin metadata
-│   ├── deps_manager.py        # Dependency management (isolated venv)
-│   ├── uv_manager.py          # uv package installer
-│   ├── ai/                    # AI agent module
-│   │   ├── __init__.py
-│   │   ├── model_config.py    # GeoAgent provider/model settings
-│   │   ├── llm_client.py      # Compatibility exports
-│   │   ├── agent.py           # Legacy agent loop
-│   │   ├── tools.py           # GeoAgent-backed tool registry
-│   │   ├── workers.py         # Legacy QThread worker
-│   │   └── oauth.py           # OAuth PKCE flow
+│   ├── deps_manager.py        # Dependency checks
 │   ├── dialogs/               # UI widgets
 │   │   ├── opera_dock.py      # Main search interface
-│   │   ├── ai_chat_dock.py    # AI chat interface
 │   │   ├── settings_dock.py   # Settings panel
 │   │   └── update_checker.py  # Update checker dialog
 │   └── icons/                 # Plugin icons
@@ -227,7 +191,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [NASA OPERA Project](https://www.jpl.nasa.gov/go/opera) for providing the data products
 - [earthaccess](https://github.com/nsidc/earthaccess) for NASA Earthdata access
-- [GeoAgent](https://github.com/opengeos/GeoAgent) for geospatial agent tools and model providers
+- [OpenGeoAgent](https://github.com/opengeos/GeoAgent/tree/main/qgis_geoagent/open_geoagent) for the QGIS chat panel
 - [leafmap](https://github.com/opengeos/leafmap) for inspiration on the GUI design
 - The QGIS community for the excellent GIS platform
 
