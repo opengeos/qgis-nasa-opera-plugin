@@ -46,13 +46,16 @@ To access NASA OPERA data, you need a free NASA Earthdata account:
 
 ### Python Dependencies
 
-Install these packages in the QGIS Python environment, or in an environment
-available on the QGIS Python path:
+Open **NASA OPERA > Settings > Dependencies** and click **Install Dependencies**
+to install these packages in an isolated plugin environment:
 
 - `earthaccess` - NASA Earthdata search and download
 - `geopandas` - Geospatial data manipulation
 - `shapely` - Geometry operations
 - `pandas` - Data analysis
+
+The isolated environment is created under `~/.qgis_nasa_opera/` and is added
+to the plugin path automatically when QGIS loads NASA OPERA.
 
 ## Installation
 
@@ -140,6 +143,7 @@ installation.
 
 Access settings via **NASA OPERA > Settings**:
 
+- **Dependencies**: Install and verify required Python packages
 - **Credentials**: Configure your NASA Earthdata username and password
 - **Display**: Customize footprint styles and default colormap
 - **Advanced**: Set default search parameters and cache options
@@ -162,7 +166,8 @@ qgis-nasa-opera-plugin/
 │   ├── __init__.py            # Plugin entry point
 │   ├── nasa_opera.py          # Main plugin class
 │   ├── metadata.txt           # Plugin metadata
-│   ├── deps_manager.py        # Dependency checks
+│   ├── deps_manager.py        # Dependency checks and installer
+│   ├── uv_manager.py          # uv bootstrap helper for dependency installs
 │   ├── dialogs/               # UI widgets
 │   │   ├── opera_dock.py      # Main search interface
 │   │   ├── settings_dock.py   # Settings panel
