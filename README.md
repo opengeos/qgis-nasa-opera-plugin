@@ -1,6 +1,6 @@
 # NASA OPERA QGIS Plugin
 
-[![QGIS](https://img.shields.io/badge/QGIS-3.28+-green.svg)](https://qgis.org)
+[![QGIS Plugin](https://img.shields.io/badge/QGIS-Plugin-green.svg)](https://plugins.qgis.org/plugins/nasa_opera)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A QGIS plugin for searching, visualizing, and analyzing NASA OPERA (Observational Products for End-Users from Remote Sensing Analysis) satellite data products.
@@ -28,6 +28,12 @@ Learn more: [NASA OPERA Project](https://www.jpl.nasa.gov/go/opera)
 - **Settings Panel**: Configure Earthdata credentials, display options, and search defaults
 - **Update Checker**: Check for plugin updates from GitHub
 
+## Video Tutorial
+
+[QGIS NASA OPERA Plugin + AI Agent (Full Tutorial)](https://youtu.be/8J37g9NxHmM)
+
+[![Video Tutorial](https://img.youtube.com/vi/8J37g9NxHmM/maxresdefault.jpg)](https://youtu.be/8J37g9NxHmM)
+
 ## Prerequisites
 
 ### NASA Earthdata Account
@@ -50,9 +56,16 @@ available on the QGIS Python path:
 
 ## Installation
 
-### Method 1: Install from Source
+### Method 1: From QGIS Plugin Manager (Recommended)
+
+1. Launch QGIS
+2. Go to `Plugins` → `Manage and Install Plugins...`
+3. Switch to the `All` tab, search for `NASA OPERA`, select it, and click `Install Plugin`
+
+### Method 2: Install from Source
 
 1. Clone or download this repository:
+
    ```bash
    git clone https://github.com/opengeos/qgis-nasa-opera-plugin.git
    cd qgis-nasa-opera-plugin
@@ -61,11 +74,13 @@ available on the QGIS Python path:
 2. Run the installation script:
 
    **Linux/macOS:**
+
    ```bash
    ./install.sh
    ```
 
    **Windows/Cross-platform (Python):**
+
    ```bash
    python install.py
    ```
@@ -77,7 +92,7 @@ available on the QGIS Python path:
    - Search for "NASA OPERA"
    - Check the box to enable it
 
-### Method 2: Manual Installation
+### Method 3: Manual Installation
 
 1. Download or clone this repository
 
