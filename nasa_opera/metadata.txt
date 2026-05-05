@@ -29,7 +29,7 @@ about=NASA OPERA Plugin for QGIS provides an intuitive interface for searching a
     - Plugin update checker
 
     Requirements:
-    - Python packages: earthaccess, geopandas, shapely, pandas
+    - Python packages: earthaccess, geopandas, shapely, pandas (installed via Settings > Dependencies)
     - NASA Earthdata account (free registration at https://urs.earthdata.nasa.gov)
 
 tracker=https://github.com/opengeos/qgis-nasa-opera-plugin/issues
@@ -48,7 +48,8 @@ deprecated=False
 
 changelog=
     0.8.2
-        - Remove bundled AI assistant panel and dependency installers
+        - Add Settings > Dependencies one-click dependency installer
+        - Remove bundled AI assistant panel
         - Route the AI Assistant button to OpenGeoAgent
     0.8.1
         - Update AI models in README and LLM client

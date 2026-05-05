@@ -201,16 +201,23 @@ class NasaOpera:
 
                 if not all_dependencies_met():
                     missing = ", ".join(get_missing_packages())
-                    QMessageBox.warning(
-                        self.iface.mainWindow(),
-                        "Missing Dependencies",
+                    box = QMessageBox(self.iface.mainWindow())
+                    box.setIcon(QMessageBox.Icon.Warning)
+                    box.setWindowTitle("Missing Dependencies")
+                    box.setText(
                         "The NASA OPERA plugin requires additional Python "
                         "packages that are not installed.\n\n"
                         f"Missing packages: {missing}\n\n"
-                        "Install them in the QGIS Python environment, or in "
-                        "an environment available on the QGIS Python path, "
-                        "then restart QGIS.",
+                        "Open Settings > Dependencies to install them in an "
+                        "isolated plugin environment."
                     )
+                    install_button = box.addButton(
+                        "Install Dependencies", QMessageBox.ButtonRole.ActionRole
+                    )
+                    box.addButton(QMessageBox.StandardButton.Ok)
+                    box.exec()
+                    if box.clickedButton() == install_button:
+                        self.show_dependencies_settings()
                     self.opera_action.setChecked(False)
                     return
             except Exception as exc:
@@ -408,6 +415,22 @@ class NasaOpera:
     def _on_settings_visibility_changed(self, visible):
         """Handle Settings dock visibility change."""
         self.settings_action.setChecked(visible)
+
+    def show_dependencies_settings(self):
+        """Open the settings dock on the dependency installer tab."""
+        if self._settings_dock is None:
+            self.toggle_settings_dock()
+
+        if self._settings_dock is not None:
+            if not self._settings_dock.isVisible():
+                self._settings_dock.show()
+            self._settings_dock.raise_()
+            self.settings_action.setChecked(True)
+            show_dependencies_tab = getattr(
+                self._settings_dock, "show_dependencies_tab", None
+            )
+            if callable(show_dependencies_tab):
+                show_dependencies_tab()
 
     def show_about(self):
         """Display the about dialog."""
