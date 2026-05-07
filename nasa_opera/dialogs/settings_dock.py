@@ -26,6 +26,8 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtGui import QFont
 
+from nasa_opera.utils.earthdata_credentials import save_earthdata_credentials
+
 
 class SettingsDockWidget(QDockWidget):
     """A settings panel for configuring plugin options."""
@@ -357,7 +359,7 @@ class SettingsDockWidget(QDockWidget):
 
         # Note about netrc
         netrc_label = QLabel(
-            "Note: Credentials are stored in ~/.netrc file for earthaccess."
+            "Note: Credentials are stored in a netrc file for earthaccess."
         )
         netrc_label.setWordWrap(True)
         netrc_label.setStyleSheet("font-size: 9px; font-style: italic;")
@@ -677,48 +679,9 @@ class SettingsDockWidget(QDockWidget):
         )
 
     def _save_to_netrc(self, username, password):
-        """Save credentials to .netrc file for earthaccess."""
-        import os
-        from pathlib import Path
-
-        netrc_path = Path.home() / ".netrc"
-
+        """Save credentials to a netrc file for earthaccess."""
         try:
-            # Read existing content
-            existing_lines = []
-            if netrc_path.exists():
-                with open(netrc_path, "r") as f:
-                    existing_lines = f.readlines()
-
-            # Remove existing earthdata entry
-            new_lines = []
-            skip_machine = False
-            for line in existing_lines:
-                if line.strip().startswith("machine urs.earthdata.nasa.gov"):
-                    skip_machine = True
-                    continue
-                if (
-                    skip_machine
-                    and line.strip()
-                    and not line.strip().startswith("machine")
-                ):
-                    continue
-                skip_machine = False
-                new_lines.append(line)
-
-            # Add new entry
-            new_lines.append(
-                f"\nmachine urs.earthdata.nasa.gov login {username} password {password}\n"
-            )
-
-            # Write file
-            with open(netrc_path, "w") as f:
-                f.writelines(new_lines)
-
-            # Set permissions (Unix-like systems)
-            if os.name != "nt":
-                os.chmod(netrc_path, 0o600)
-
+            save_earthdata_credentials(username, password)
         except Exception as e:
             QMessageBox.warning(
                 self,
