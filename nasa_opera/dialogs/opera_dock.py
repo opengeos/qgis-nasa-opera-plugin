@@ -66,6 +66,8 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QVariant
 from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand
 
+from nasa_opera.utils.earthdata_credentials import configure_earthdata_netrc_env
+
 # NASA OPERA datasets
 OPERA_DATASETS = {
     "OPERA_L3_DSWX-HLS_V1": {
@@ -434,6 +436,8 @@ def _earthdata_login():
         RuntimeError: If authentication fails (credentials not configured).
     """
     import earthaccess
+
+    configure_earthdata_netrc_env()
 
     auth = None
     for strategy in ("environment", "netrc"):
