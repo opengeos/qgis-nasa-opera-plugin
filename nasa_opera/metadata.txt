@@ -46,7 +46,7 @@ icon=icons/opera.svg
 experimental=False
 deprecated=False
 
-changelog=
+changelog=Fix macOS QGIS installer dependency installation and bump patch version.
     0.9.1
         - Fix Earthdata netrc credential reuse on Windows
     0.9.0
