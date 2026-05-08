@@ -205,9 +205,25 @@ def _is_python_executable_name(path: str) -> bool:
     )
 
 
+def _is_macos_qgis_app_bundle_python(path: str) -> bool:
+    """Return True for Python binaries inside a QGIS macOS .app bundle."""
+    if not (platform.system() == "Darwin" or sys.platform == "darwin"):
+        return False
+    parts = os.path.abspath(path).split(os.sep)
+    for idx, part in enumerate(parts):
+        lower = part.lower()
+        if not (lower.startswith("qgis") and lower.endswith(".app")):
+            continue
+        return idx + 1 < len(parts) and parts[idx + 1] == "Contents"
+    return False
+
+
 def _python_candidate_matches_runtime(path: str) -> bool:
     """Return True when a candidate is executable and matches QGIS Python."""
     if not path or not os.path.isfile(path) or not _is_python_executable_name(path):
+        return False
+
+    if _is_macos_qgis_app_bundle_python(path):
         return False
 
     try:
@@ -504,11 +520,23 @@ def create_venv(venv_dir: str) -> str:
     env = _get_clean_env()
     kwargs = _get_subprocess_kwargs()
 
-    # Strategy 0: Use uv venv when available (fastest, no pip needed)
+    python_exe = None
+    python_lookup_error = ""
+    try:
+        python_exe = _find_python_executable()
+    except RuntimeError as exc:
+        python_lookup_error = str(exc)
+
+    # Strategy 0: Use uv venv when available (fastest, no pip needed). On
+    # official macOS QGIS app bundles, require uv-managed Python instead of
+    # reusing QGIS's app-bundle Python wrapper for venv creation.
     if uv_exists():
         uv_path = get_uv_path()
-        python_exe = _find_python_executable()
-        cmd = [uv_path, "venv", "--python", python_exe, venv_dir]
+        uv_python = python_exe or f"{sys.version_info.major}.{sys.version_info.minor}"
+        cmd = [uv_path, "venv"]
+        if python_exe is None:
+            cmd.append("--managed-python")
+        cmd += ["--python", uv_python, venv_dir]
         result = subprocess.run(  # nosec B603
             cmd,
             capture_output=True,
@@ -523,8 +551,9 @@ def create_venv(venv_dir: str) -> str:
         _cleanup_partial_venv(venv_dir)
 
     # Strategy 1: Subprocess with the real Python executable
-    python_exe = _find_python_executable()
     subprocess_error = ""
+    if python_exe is None:
+        raise RuntimeError(python_lookup_error)
 
     cmd = [python_exe, "-m", "venv", venv_dir]
     result = subprocess.run(  # nosec B603
