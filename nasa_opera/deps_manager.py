@@ -206,7 +206,7 @@ def _is_python_executable_name(path: str) -> bool:
 
 
 def _is_macos_qgis_app_bundle_python(path: str) -> bool:
-    """Return True for Python binaries inside a QGIS macOS .app bundle."""
+    """Return True for unsafe Python launchers in QGIS.app/Contents/MacOS."""
     if not (platform.system() == "Darwin" or sys.platform == "darwin"):
         return False
     parts = os.path.abspath(path).split(os.sep)
@@ -214,7 +214,12 @@ def _is_macos_qgis_app_bundle_python(path: str) -> bool:
         lower = part.lower()
         if not (lower.startswith("qgis") and lower.endswith(".app")):
             continue
-        return idx + 1 < len(parts) and parts[idx + 1] == "Contents"
+        if idx + 2 >= len(parts):
+            return False
+        if parts[idx + 1].lower() != "contents" or parts[idx + 2].lower() != "macos":
+            return False
+        name = os.path.basename(path).lower()
+        return name.startswith("qgis") or _is_python_executable_name(path)
     return False
 
 
@@ -530,6 +535,7 @@ def create_venv(venv_dir: str) -> str:
     # Strategy 0: Use uv venv when available (fastest, no pip needed). On
     # official macOS QGIS app bundles, require uv-managed Python instead of
     # reusing QGIS's app-bundle Python wrapper for venv creation.
+    uv_error = ""
     if uv_exists():
         uv_path = get_uv_path()
         uv_python = python_exe or f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -547,13 +553,17 @@ def create_venv(venv_dir: str) -> str:
         )
         if result.returncode == 0 and os.path.isfile(python_path):
             return python_path
+        uv_error = result.stderr or result.stdout or f"exit code {result.returncode}"
         # uv venv failed — clean up and fall through to pip strategies
         _cleanup_partial_venv(venv_dir)
 
     # Strategy 1: Subprocess with the real Python executable
     subprocess_error = ""
     if python_exe is None:
-        raise RuntimeError(python_lookup_error)
+        message = python_lookup_error or "No usable Python executable was found."
+        if uv_error:
+            message += f"\nuv venv failed: {uv_error}"
+        raise RuntimeError(message)
 
     cmd = [python_exe, "-m", "venv", venv_dir]
     result = subprocess.run(  # nosec B603
