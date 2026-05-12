@@ -18,6 +18,7 @@ OPEN_GEOAGENT_PLUGIN_CANDIDATES = ("open_geoagent",)
 TOOLBAR_OBJECT_NAME = "NasaOperaToolbar"
 MENU_TITLE = "&NASA OPERA"
 
+
 class NasaOpera:
     """NASA OPERA implementation class for QGIS."""
 
@@ -171,7 +172,6 @@ class NasaOpera:
             status_tip="About NASA OPERA Plugin",
             parent=self.iface.mainWindow(),
         )
-
 
     def _remove_toolbar(self, toolbar):
         """Detach and schedule deletion of a plugin toolbar widget."""
